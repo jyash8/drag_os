@@ -48,6 +48,7 @@ const DENTRY_CACHE_MAX: usize = 256;
 /// Handles of the mounted disk filesystem for sync/fsync (whichever mounted).
 pub static MOUNTED_EXT4: SpinLock<Option<Arc<ext4::Ext4Fs>>> = SpinLock::new(None);
 pub static MOUNTED_EXT2: SpinLock<Option<Arc<ext2::Ext2Fs>>> = SpinLock::new(None);
+pub static MOUNTED_VFAT: SpinLock<Option<Arc<vfat::VfatFs>>> = SpinLock::new(None);
 
 /// Flush all dirty filesystem blocks and superblocks to disk.
 pub fn sync_all() {
@@ -57,6 +58,9 @@ pub fn sync_all() {
     if let Some(fs) = MOUNTED_EXT2.lock().as_ref() {
         let _ = fs.cache.sync();
         let _ = fs.update_superblock();
+    }
+    if let Some(fs) = MOUNTED_VFAT.lock().as_ref() {
+        let _ = fs.sync_all();
     }
 }
 

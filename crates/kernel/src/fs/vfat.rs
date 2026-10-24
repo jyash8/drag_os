@@ -76,7 +76,8 @@ impl VfatFs {
     pub fn cluster_size(&self) -> usize {
         (self.sectors_per_cluster as usize) * (self.bytes_per_sector as usize)
     }
-    pub fn fat_type(&self) -> u32 { self.fat_type }
+    pub fn sync_all(&self) -> Result<(),()> { Ok(()) }
+pub fn fat_type(&self) -> u32 { self.fat_type }
     pub fn root_cluster(&self) -> u32 { self.root_cluster }
     pub fn is_end(&self, c: u32) -> bool {
         match self.fat_type {
@@ -552,6 +553,7 @@ impl Filesystem for VfatFilesystem {
             _ => return Err(crate::arch::x86_64::syscalls::EINVAL),
         };
         let fs = VfatFs::open(reader).ok_or(crate::arch::x86_64::syscalls::EINVAL)?;
+        *crate::fs::MOUNTED_VFAT.lock() = Some(Arc::new(fs.clone()));
         Ok(Arc::new(VfatDir { fs: Arc::new(fs.clone()), first_cluster: fs.root_cluster(), is_root: true, cached: alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0)) }))
     }
 }
