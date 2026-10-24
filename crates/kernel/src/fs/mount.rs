@@ -210,6 +210,7 @@ pub fn register_default_filesystems() {
     fs.push(Box::new(Ext4Filesystem));
     fs.push(Box::new(Ext2Filesystem));
     fs.push(Box::new(FuseFilesystem));
+    fs.push(Box::new(crate::fs::vfat::VfatFilesystem));
 }
 
 pub fn register_pseudo_mounts() {

@@ -21,6 +21,7 @@ pub mod sysfs;
 pub mod tar;
 pub mod tmpfs;
 pub mod udev;
+pub mod vfat;
 pub mod vfs;
 
 /// Static /proc/asound/cards content for ALSA card detection.
