@@ -1,0 +1,41 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#1a1a2e'}}}%%
+mermaid
+graph TD
+    A[kernel/src/main.rs] --> B[kernel/src/lib.rs]
+    B --> C[kernel/src/time.rs]
+    B --> D[kernel/src/interrupts.rs]
+    B --> E[kernel/src/drivers/]
+    B --> E1[kernel/src/drivers/keyboard.rs]
+    B --> E2[kernel/src/drivers/ps2_mouse.rs]
+    B --> E2[kernel/src/drivers/usb/xhci.rs]
+    B --> F[kernel/src/fs/]
+    B --> F1[kernel/src/fs/sysfs.rs]
+    B --> F2[kernel/src/fs/pty.rs]
+    B --> G[kernel/src/arch/x86_64/]
+    B --> G1[kernel/src/arch/x86_64/syscalls/]
+    B --> H[kernel/src/memory/]
+    
+    C --> H
+    D --> H
+    D --> H1[kernel/src/drivers/uevent.rs]
+    
+    style A fill:#1a1a2e, color:#f5f0e7, stroke:#359bdf
+    style B fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style C fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style D fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style D1 fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style E fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style E1 fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style E2 fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style F fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style F1 fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style F2 fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style G fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style G1 fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style G fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    style H fill:#16213e, color:#f5f0e7, stroke:#359bdf
+    
+    classDef kernel fill:#1a1a2e, color:#f5f0e7, stroke:#359bdf, stroke-width:2px;
+    classDef process fill:#16213e, color:#f5f0e7, stroke:#359bdf, stroke-width:1px;
+    
+    class A,B,C,D,E,F,G,H kernel;

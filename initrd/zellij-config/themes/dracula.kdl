@@ -1,0 +1,3 @@
+// Minimal theme stub so the themes directory exists and can be listed.
+background 0x1e1f22
+foreground 0xf8f8f2

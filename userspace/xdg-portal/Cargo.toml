@@ -1,0 +1,20 @@
+[workspace]
+
+[package]
+name = "xdg-portal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Keep dependencies minimal per the mywima size invariant.
+# Only libc for raw syscalls and serde for settings JSON.
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

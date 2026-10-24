@@ -1,0 +1,16 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#1a1a2e'}}}%%
+mermaid
+graph TD
+    A[kernel/src/main.rs] --> B[kernel/src/lib.rs]
+    B --> C[kernel/src/time.rs]
+    B --> D[kernel/src/interrupts.rs]
+    B --> E[kernel/src/drivers/]
+    C --> H[kernel/src/memory/]
+    
+    style A fill:#1a1a2e, color:#f5f0e7
+    style B fill:#16213e, color:#f5f0e7
+    style C fill:#16213e, color:#f5f0e7
+    style D fill:#16213e, color:#f5f0e7
+    style H fill:#16213e, color:#f5f0e7
+    
+    class A,B,C,D,H kernel;

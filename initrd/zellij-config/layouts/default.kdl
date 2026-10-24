@@ -1,0 +1,17 @@
+// Zellij default layout.
+//
+// The dialect requires a top-level `layout { ... }` node — a bare `tab { }` is
+// a parse error ("Failed to parse Zellij configuration"). The window-size
+// placeholder {width}/{height} is substituted by zellij at load time.
+//
+// Tab bar on top, one full-size pane, status bar at the bottom, which is what a
+// fresh session is expected to look like.
+layout {
+    pane size=1 borderless=true {
+        plugin location="tab-bar"
+    }
+    pane
+    pane size=1 borderless=true {
+        plugin location="status-bar"
+    }
+}

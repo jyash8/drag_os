@@ -1,0 +1,40 @@
+# Relocation types the module loader handles.
+#
+# This file is the single source of truth for the relocator's coverage. The
+# census test (scripts/module-census.sh) asserts that every relocation the
+# fixture module emits appears here, and that every entry here is actually
+# exercised. The relocator builds its match table from this list rather than
+# hardcoding types, so adding a type here without implementing it fails the
+# census rather than silently widening what the loader claims to handle.
+#
+# Format: one R_X86_64_* name per line. Blank lines and `#` comments ignored.
+# The numeric ELF values are in docs/module-system.md and in the relocator; they
+# are repeated nowhere else on purpose, so this list cannot drift into naming a
+# type with the wrong value.
+#
+# Measured against `modules/fixture` with
+#   rustc --target x86_64-unknown-none -C relocation-model=static \
+#         -C code-model=kernel --emit=obj
+# See §2.1 (Linux) and §8.2 (coverage requirement).
+
+# 64-bit absolute. The address goes in an imm64, so this is the only type that
+# can express a pointer to a 64-bit location -- e.g. the heap, which is outside
+# the sign-extendable range (§16.6). Relocations of this type are what a
+# skipped GOTPCREL would have replaced.
+R_X86_64_64
+
+# Signed 32-bit absolute, sign-extended. The signature of `-C code-model=kernel`
+# (§5.1). Only valid against addresses that sign-extend to themselves, which
+# is why §4 places the module window below 0xffffffffa0000000 (§13.3).
+R_X86_64_32S
+
+# PC-relative 32-bit displacement. The workhorse: local calls, and loads of
+# undefined kernel statics. Pairs with the addend already stored in the slot.
+R_X86_64_PC32
+
+# Call/jump to a PLT entry, PC-relative 32-bit. With no GOT and no PLT section
+# in the final image this is the same arithmetic as PC32; it is kept separate
+# because the *meaning* differs -- the target is an undefined symbol the loader
+# must resolve (§6.2), whereas a PC32 against a defined symbol is internal to
+# the module and needs no resolution.
+R_X86_64_PLT32

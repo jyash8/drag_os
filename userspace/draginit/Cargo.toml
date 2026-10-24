@@ -1,0 +1,12 @@
+[package]
+name = "draginit"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone userspace crate: detached from the kernel workspace above.
+[workspace]
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
+libc = "0.2"

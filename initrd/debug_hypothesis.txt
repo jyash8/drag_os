@@ -1,0 +1,1 @@
+[DEBUG_HYPOTHESIS] Testting GBM device creation with swrast forced; /proc mounted; /sys/dev/char/226:0/device/driver symlink present; GBM_BACKEND=dri; GBM_BACKENDS_PATH=/usr/lib/gbm; MESA_LOADER_DRIVER_OVERRIDE=swrast.

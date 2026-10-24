@@ -1,0 +1,67 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#1a1a2e', 'secondaryColor': '#16213e', 'tertiaryColor': '#f5f0e7'}}}%%
+mermaid
+flowchart TD
+    %% Main entry points
+    subgraph KernelEntry [Kernel Entry Points]
+        KM[kernel/src/main.rs]
+        KL[kernel/src/lib.rs]
+    end
+    
+    %% Core subsystems
+    subgraph KernelCore [Kernel Core Subsystems]
+        direction TB
+        KS[kernel/src/smp.rs]
+        KT[kernel/src/time.rs]
+        KI[kernel/src/interrupts.rs]
+        KD[kernel/src/drivers/]
+        KF[kernel/src/fs/]
+        KA[kernel/src/arch/x86_64/]
+        KMem[kernel/src/memory/]
+    end
+    
+    %% Input subsystem (highlighted)
+    subgraph InputSys [Input Subsystem]
+        direction LR
+        KBD[kernel/src/drivers/keyboard.rs]
+        PS2[kernel/src/drivers/ps2_mouse.rs]
+        USB[kernel/src/drivers/usb/xhci.rs]
+        UE[kernel/src/drivers/uevent.rs]
+    end
+    
+    %% Memory and scheduling
+    subgraph MemSched [Memory & Scheduling]
+        direction TB
+        MS[kernel/src/memory/]
+        SC[kernel/src/sched.rs]
+    end
+    
+    %% Connections
+    KM --> KL
+    KL --> KS
+    KL --> KT
+    KL --> KI
+    KL --> KBD
+    KL --> PS2
+    KL --> USB
+    KL --> UE
+    KL --> MemSched
+    
+    KS --> KBD
+    KS --> PS2
+    KS --> USB
+    
+    KBD --> Input
+    PS2 --> Input
+    USB --> Input
+    UE --> Input
+    
+    %% Styling
+    classDef kernel fill:#1a1a2e, color:#f5f0e7, stroke:#359bdf, stroke-width:2px;
+    classDef subsystem fill:#16213e, color:#f5f0e7, stroke:#359bdf, stroke-width:1px;
+    classDef input fill:#ff6b6b, color:#ffffff, stroke:#ff6b6b, stroke-width:2px;
+    classDef memory fill:#2c3e50, color:#f5f0e7, stroke:#359bdf;
+    
+    class KernelEntry kernel;
+    class KernelCore KernelCore;
+    class InputSys Input;
+    class MemSched MemSched;
