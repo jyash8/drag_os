@@ -82,7 +82,11 @@ pub fn load_bytes(data: &[u8]) -> u64 {
     use crate::arch::x86_64::syscalls::EINVAL;
     use crate::arch::x86_64::syscalls::ENOMEM;
     match unsafe { crate::module::loader::load(data) } {
-        Ok(loaded) => loaded.init_result as u64,
+        Ok(loaded) => {
+            let r = loaded.init_result;
+            LOADED_MODULES.lock().push(loaded);
+            r as u64
+        }
         Err(crate::module::loader::LoadError::Invalid(_)) => EINVAL,
         Err(crate::module::loader::LoadError::NotElf) => EBADMSG,
         Err(crate::module::loader::LoadError::NoSlot)
@@ -174,4 +178,54 @@ pub fn sys_finit_module(fd: i32, _uargs: u64, _flags: i32) -> u64 {
         return EINVAL;
     }
     load_bytes(&data)
+}
+
+use crate::fs::vfs::FileNode;
+use alloc::sync::Arc;
+use alloc::string::String;
+use crate::arch::x86_64::syscalls::Stat;
+
+pub static LOADED_MODULES: crate::arch::sync::spinlock::SpinLock<alloc::vec::Vec<crate::module::loader::Loaded>> =
+    crate::arch::sync::spinlock::SpinLock::new(alloc::vec::Vec::new());
+
+pub struct LoadedModuleNode;
+
+fn modules_content() -> alloc::vec::Vec<u8> {
+    use core::fmt::Write;
+    let mut out = String::new();
+    let g = LOADED_MODULES.lock();
+    let _ = writeln!(out, "Name\tBase\tLen\tInit");
+    for l in g.iter() {
+        let _ = writeln!(out, "module\t0x{:x}\t{}\t{}", l.base, l.len, l.init_result);
+    }
+    out.into_bytes()
+}
+
+impl FileNode for LoadedModuleNode {
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, u64> {
+        let content = modules_content();
+        if offset >= content.len() {
+            return Ok(0);
+        }
+        let n = (content.len() - offset).min(buf.len());
+        buf[..n].copy_from_slice(&content[offset..offset + n]);
+        Ok(n)
+    }
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> Result<usize, u64> { Err(0) }
+    fn lookup(&self, _name: &str) -> Result<Arc<dyn FileNode>, u64> { Err(0) }
+    fn create(&self, _name: &str, _is_dir: bool, _mode: u32, _uid: u32, _gid: u32) -> Result<Arc<dyn FileNode>, u64> { Err(0) }
+    fn truncate(&self, _size: usize) -> Result<(), u64> { Ok(()) }
+    fn stat(&self) -> Stat {
+        let content = modules_content();
+        let mut st = Stat::default();
+        st.st_size = content.len() as i64;
+        st
+    }
+    fn is_dir(&self) -> bool { false }
+    fn size(&self) -> usize { modules_content().len() }
+    fn list_dir(&self) -> Result<alloc::vec::Vec<(String, bool)>, u64> { Ok(alloc::vec::Vec::new()) }
+}
+
+pub fn proc_modules_node() -> Arc<dyn FileNode> {
+    Arc::new(LoadedModuleNode)
 }

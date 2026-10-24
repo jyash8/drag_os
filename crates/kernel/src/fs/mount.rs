@@ -241,6 +241,15 @@ pub fn register_pseudo_mounts() {
         };
         let _ = mount_add(m);
     }
+    let m = Mount {
+        mountpoint: String::from("/proc/modules"),
+        root: crate::module::proc_modules_node(),
+        fstype: "procmodules",
+        source: None,
+        flags: 0,
+        open_count: AtomicUsize::new(0),
+    };
+    let _ = mount_add(m);
     ensure_root_namespace();
 }
 pub fn record_open(path: &str) {
