@@ -75,7 +75,8 @@ fn is_pseudo(fstype: &str) -> bool {
 }
 
 pub fn mount_add(m: Mount) -> Result<(), u64> {
-    let mut mounts = MOUNTS.lock();
+    let ns = current_ns();
+    let mut mounts = ns.mounts.lock();
     // stacking: allow multiple mounts on the same point (top wins)
     mounts.push(Arc::new(m));
     Ok(())
@@ -85,7 +86,8 @@ pub fn mount_remove(mountpoint: &str, _flags: u64) -> Result<(), u64> {
     if mountpoint == "/" {
         return Err(crate::arch::x86_64::syscalls::EINVAL);
     }
-    let mut mounts = MOUNTS.lock();
+    let ns = current_ns();
+    let mut mounts = ns.mounts.lock();
     let idx = mounts.iter().rposition(|m| m.mountpoint == mountpoint);
     match idx {
         Some(i) => {
