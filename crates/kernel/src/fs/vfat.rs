@@ -254,8 +254,11 @@ pub struct VfatDir {
 #[derive(Clone)]
 pub struct VfatFile {
     pub fs: Arc<VfatFs>,
-    pub first_cluster: u32,
-    pub size: usize,
+    pub first_cluster: Arc<core::sync::atomic::AtomicU32>,
+    pub parent_cluster: u32,
+    pub size: Arc<core::sync::atomic::AtomicUsize>,
+    pub entry_sector: u64,
+    pub entry_offset: usize,
 }
 
 impl FileNode for VfatDir {
@@ -263,13 +266,13 @@ impl FileNode for VfatDir {
     fn write_at(&self, _: usize, _: &[u8]) -> Result<usize,u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn lookup(&self, name: &str) -> Result<Arc<dyn FileNode>, u64> {
         let mut out=Vec::new();
-        self.fs.list_entries(self.first_cluster,&mut out);
+        self.fs.list_entries(self.first_cluster, &mut out);
         for (n,is_dir,cluster,size) in out {
             if n.to_lowercase()==name.to_lowercase() {
                 if is_dir {
                     return Ok(Arc::new(VfatDir{fs:self.fs.clone(),first_cluster:cluster,is_root:false,cached:alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0))}));
                 } else {
-                    return Ok(Arc::new(VfatFile{fs:self.fs.clone(),first_cluster:cluster,size}));
+                    return Ok(Arc::new(VfatFile{fs:self.fs.clone(), first_cluster:alloc::sync::Arc::new(core::sync::atomic::AtomicU32::new(cluster)), parent_cluster:if self.is_root { 0 } else { self.first_cluster }, size:Arc::new(core::sync::atomic::AtomicUsize::new(size)), entry_sector:0, entry_offset:0}));
                 }
             }
         }
@@ -282,7 +285,7 @@ impl FileNode for VfatDir {
     fn size(&self)->usize{0}
     fn list_dir(&self)->Result<Vec<(String,bool)>,u64> {
         let mut out=Vec::new();
-        self.fs.list_entries(self.first_cluster,&mut out);
+        self.fs.list_entries(self.first_cluster, &mut out);
         Ok(out.into_iter().map(|e|(e.0,e.1)).collect())
     }
     fn unlink(&self,_:&str)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
@@ -297,12 +300,13 @@ impl FileNode for VfatDir {
 
 impl FileNode for VfatFile {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, u64> {
-        let n = (self.size - offset).min(buf.len());
-        if offset >= self.size { return Ok(0); }
+        let size = self.size.load(core::sync::atomic::Ordering::SeqCst);
+        let n = (size - offset).min(buf.len());
+        if offset >= size { return Ok(0); }
         // Walk cluster chain
         let cl_size = self.fs.cluster_size();
         let mut data_off = 0usize;
-        let mut cluster = self.first_cluster;
+        let mut cluster = self.first_cluster.load(core::sync::atomic::Ordering::SeqCst);
         let mut buf_pos = 0usize;
         let buf_target = offset + n;
         while !self.fs.is_end(cluster) && cluster != 0 && buf_pos < buf_target {
@@ -329,13 +333,13 @@ impl FileNode for VfatFile {
         }
         Ok(buf_pos.min(n))
     }
-    fn write_at(&self, _: usize, _: &[u8]) -> Result<usize, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
+    fn write_at(&self, offset: usize, buf: &[u8]) -> Result<usize, u64> { self.fs.write_wrap(self, offset, buf) }
     fn lookup(&self, _: &str) -> Result<Arc<dyn FileNode>, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn create(&self, _n: &str, _i: bool, _m: u32, _u: u32, _g: u32) -> Result<Arc<dyn FileNode>, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn truncate(&self, _: usize) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn stat(&self) -> crate::arch::x86_64::syscalls::Stat { crate::arch::x86_64::syscalls::Stat::default() }
+    fn truncate(&self, size: usize) -> Result<(), u64> { self.fs.truncate_wrap(self, size) }
+    fn stat(&self) -> crate::arch::x86_64::syscalls::Stat { let mut st=crate::arch::x86_64::syscalls::Stat::default(); st.st_size=self.size.load(core::sync::atomic::Ordering::SeqCst) as i64; st }
     fn is_dir(&self) -> bool { false }
-    fn size(&self) -> usize { self.size }
+    fn size(&self) -> usize { self.size.load(core::sync::atomic::Ordering::SeqCst) }
     fn list_dir(&self) -> Result<Vec<(String, bool)>, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn unlink(&self, _: &str) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn rename(&self, _: &str) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
@@ -368,5 +372,232 @@ pub fn register() {
     let mut fs = crate::fs::mount::FILESYSTEMS.lock();
     if !fs.iter().any(|f| f.name() == "vfat") {
         fs.push(alloc::boxed::Box::new(VfatFilesystem));
+    }
+}
+
+impl VfatFs {
+    pub fn eoc_value(&self) -> u32 {
+        match self.fat_type {
+            12 => 0x0FFF,
+            16 => 0xFFFF,
+            32 => 0x0FFFFFFF,
+            _ => 0xFFFFFFFF,
+        }
+    }
+    pub fn set_fat_entry(&self, cluster: u32, value: u32) -> bool {
+        let fat_off = cluster * (self.fat_type / 8);
+        let sec = self.reserved_sectors as u64 + ((fat_off as u64) / (self.bytes_per_sector as u64));
+        let off = (fat_off % self.bytes_per_sector) as usize;
+        let mut sector = [0u8; 512];
+        if self.reader.read_sector(sec, &mut sector).is_err() { return false; }
+        match self.fat_type {
+            12 => {
+                let word_off = off & !1;
+                let mut word = u16::from_le_bytes([sector[word_off], sector[word_off + 1]]);
+                if cluster % 2 == 0 {
+                    word = (word & 0xF000) | (value as u16 & 0x0FFF);
+                } else {
+                    word = (word & 0x000F) | (((value & 0x0FFF) as u16) << 4);
+                }
+                let le = word.to_le_bytes();
+                sector[word_off] = le[0];
+                sector[word_off + 1] = le[1];
+            }
+            16 => {
+                let le = (value as u16).to_le_bytes();
+                sector[off] = le[0];
+                sector[off + 1] = le[1];
+            }
+            32 => {
+                let le = value.to_le_bytes();
+                sector[off] = le[0];
+                sector[off + 1] = le[1];
+                sector[off + 2] = le[2];
+                sector[off + 3] = le[3];
+            }
+            _ => return false,
+        }
+        self.reader.write_sector(sec, &sector).is_ok()
+    }
+    pub fn locate_entry(&self, parent_cluster: u32, target_first: u32) -> Option<(u64, usize)> {
+        if self.fat_type == 32 {
+            let mut cluster = if parent_cluster == 0 { self.root_cluster } else { parent_cluster };
+            if cluster < 2 { cluster = self.root_cluster; }
+            let mut visited = 0usize;
+            loop {
+                if visited > 10000 { break; }
+                visited += 1;
+                if cluster < 2 || self.is_end(cluster) { break; }
+                let cl = self.cluster_size();
+                let mut b = alloc::vec![0u8; cl];
+                if self.read_cluster(cluster, &mut b).is_err() { break; }
+                for i in (0..cl).step_by(32) {
+                    if i + 32 > b.len() { break; }
+                    let e = &b[i..i + 32];
+                    if e[0] == 0 || e[0] == 0xE5 { continue; }
+                    if e[11] == 0x0F { continue; }
+                    let hi = u16::from_le_bytes([e[20], e[21]]) as u32;
+                    let lo = u16::from_le_bytes([e[26], e[27]]) as u32;
+                    if (hi << 16) | lo == target_first {
+                        let sec = self.cluster_lba(cluster) + (i as u64 / self.bytes_per_sector as u64);
+                        let off = i % self.bytes_per_sector as usize;
+                        return Some((sec, off));
+                    }
+                }
+                let next = self.fat_entry(cluster);
+                if next == 0 || next == cluster || self.is_end(next) { break; }
+                cluster = next;
+            }
+            None
+        } else {
+            let root_secs = (((self.root_entries as usize) * 32) + (self.bytes_per_sector as usize - 1)) / (self.bytes_per_sector as usize);
+            let base = self.reserved_sectors as u64;
+            for sidx in 0..root_secs {
+                let mut sec = [0u8; 512];
+                if self.reader.read_sector(base + sidx as u64, &mut sec).is_err() { continue; }
+                for i in (0..512).step_by(32) {
+                    let e = &sec[i..i + 32];
+                    if e[0] == 0 || e[0] == 0xE5 { continue; }
+                    if e[11] == 0x0F { continue; }
+                    let hi = u16::from_le_bytes([e[20], e[21]]) as u32;
+                    let lo = u16::from_le_bytes([e[26], e[27]]) as u32;
+                    if (hi << 16) | lo == target_first {
+                        return Some((base + sidx as u64, i));
+                    }
+                }
+            }
+            None
+        }
+    }
+    pub fn write_cluster(&self, cluster: u32, data: &[u8]) -> Result<(), &'static str> {
+        self.reader.write_sectors(self.cluster_lba(cluster), data)
+    }
+    pub fn write_wrap(&self, file: &VfatFile, offset: usize, buf: &[u8]) -> Result<usize, u64> {
+        use crate::arch::x86_64::syscalls::ENOMEM;
+        if buf.is_empty() { return Ok(0); }
+        let cl_size = self.cluster_size();
+        let old_size = file.size.load(core::sync::atomic::Ordering::SeqCst);
+        let target_end = offset.saturating_add(buf.len());
+        if target_end < offset { return Ok(0); }
+        let needed = (target_end.max(old_size) + cl_size - 1) / cl_size;
+        // Gather existing chain
+        let mut chain: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
+        let mut cur = file.first_cluster.load(core::sync::atomic::Ordering::SeqCst);
+        let mut visited = 0usize;
+        while chain.len() < needed && cur >= 2 && visited < 100000 {
+            visited += 1;
+            chain.push(cur);
+            if self.is_end(self.fat_entry(cur)) { break; }
+            let next = self.fat_entry(cur);
+            if next == 0 || next == cur { break; }
+            cur = next;
+        }
+        let first0 = if chain.is_empty() {
+            file.first_cluster.load(core::sync::atomic::Ordering::SeqCst)
+        } else { 0 };
+        // Allocate as needed
+        while chain.len() < needed {
+            let c = self.allocate_cluster().ok_or(ENOMEM)?;
+            if chain.is_empty() {
+                // first cluster newly allocated
+            } else {
+                let prev = *chain.last().unwrap();
+                self.set_fat_entry(prev, c);
+            }
+            chain.push(c);
+        }
+        if file.first_cluster.load(core::sync::atomic::Ordering::SeqCst) == 0 && !chain.is_empty() {
+            file.first_cluster.store(chain[0], core::sync::atomic::Ordering::SeqCst);
+        }
+        let first_cluster = if file.first_cluster.load(core::sync::atomic::Ordering::SeqCst) != 0 {
+            file.first_cluster.load(core::sync::atomic::Ordering::SeqCst)
+        } else if !chain.is_empty() { chain[0] } else { 0 };
+        if first_cluster == 0 { return Err(ENOMEM); }
+        // if initial had no chain and file.first_cluster update above, chain[0] remains new cluster
+        // read-modify-write each overlapping cluster
+        for idx in 0..chain.len() {
+            let cluster = chain[idx];
+            let start = idx * cl_size;
+            let end = start + cl_size;
+            let overlap_lo = offset.max(start);
+            let overlap_hi = target_end.min(end);
+            if overlap_hi <= overlap_lo { continue; }
+            let mut data = alloc::vec![0u8; cl_size];
+            let _ = self.read_cluster(cluster, &mut data);
+            let gap = overlap_lo - start;
+            let cnt = overlap_hi - overlap_lo;
+            let src_start = overlap_lo - offset;
+            data[gap..gap + cnt].copy_from_slice(&buf[src_start..src_start + cnt]);
+            let _ = self.write_cluster(cluster, &data);
+        }
+        let new_size = target_end.max(old_size);
+        file.size.store(new_size, core::sync::atomic::Ordering::SeqCst);
+        // best-effort parent entry update
+        let target_first = file.first_cluster.load(core::sync::atomic::Ordering::SeqCst);
+        if let Some((sec, off)) = self.locate_entry(file.parent_cluster, target_first) {
+            let mut sector = [0u8; 512];
+            if self.reader.read_sector(sec, &mut sector).is_ok() {
+                let hi = (target_first >> 16) & 0xFFFF;
+                let lo = target_first & 0xFFFF;
+                sector[off + 20] = (hi & 0xFF) as u8;
+                sector[off + 21] = ((hi >> 8) & 0xFF) as u8;
+                sector[off + 26] = (lo & 0xFF) as u8;
+                sector[off + 27] = ((lo >> 8) & 0xFF) as u8;
+                let sz = new_size as u32;
+                let b = sz.to_le_bytes();
+                sector[off + 28] = b[0];
+                sector[off + 29] = b[1];
+                sector[off + 30] = b[2];
+                sector[off + 31] = b[3];
+                let _ = self.reader.write_sector(sec, &sector);
+            }
+        }
+        Ok(buf.len())
+    }
+    pub fn allocate_cluster(&self) -> Option<u32> {
+        let max = (self.total_sectors.saturating_sub(self.data_start_sector) / self.sectors_per_cluster as u64).saturating_add(2) as u32;
+        for c in 2u32..=max {
+            if self.fat_entry(c) == 0 {
+                if self.set_fat_entry(c, self.eoc_value()) { return Some(c); }
+            }
+        }
+        None
+    }
+    pub fn truncate_wrap(&self, file: &VfatFile, new_size: usize) -> Result<(), u64> {
+        let size = file.size.load(core::sync::atomic::Ordering::SeqCst);
+        if new_size >= size {
+            file.size.store(new_size, core::sync::atomic::Ordering::SeqCst);
+            return Ok(());
+        }
+        let cl_size = self.cluster_size();
+        let needed = (new_size + cl_size - 1) / cl_size;
+        // gather chain
+        let mut chain: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
+        let mut cur = file.first_cluster.load(core::sync::atomic::Ordering::SeqCst);
+        let mut visited = 0usize;
+        while cur >= 2 && visited < 100000 {
+            visited += 1;
+            chain.push(cur);
+            if self.is_end(self.fat_entry(cur)) { break; }
+            let n = self.fat_entry(cur);
+            if n == 0 || n == cur { break; }
+            cur = n;
+        }
+        // free tail
+        if needed < chain.len() {
+            for c in &chain[needed..] {
+                self.set_fat_entry(*c, 0);
+            }
+            if needed == 0 {
+                file.first_cluster.store(0, core::sync::atomic::Ordering::SeqCst);
+            } else {
+                self.set_fat_entry(chain[needed - 1], self.eoc_value());
+            }
+        }
+        file.size.store(new_size, core::sync::atomic::Ordering::SeqCst);
+        if new_size % cl_size != 0 && needed > 0 {
+            // truncate logical tail; physical sector leaves zeros (already allocated page)
+        }
+        Ok(())
     }
 }
