@@ -1,10 +1,9 @@
 // Test cases for the DragOS test harness
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::qemu::QemuConfig;
 
@@ -50,7 +49,11 @@ fn all_tests() -> Vec<TestCase> {
         TestCase {
             name: "xdg_portal_bus",
             command: "echo PORTAL_START_TEST; mkdir -p /run/user/1000; printf '%s\\n' '<busconfig><type>session</type><listen>unix:path=/run/user/1000/bus</listen><auth>EXTERNAL</auth><standard_session_servicedirs/><policy context=\"default\"><allow send_destination=\"*\" eavesdrop=\"true\"/><allow eavesdrop=\"true\"/><allow own=\"*\"/></policy></busconfig>' > /tmp/dbus.conf; /usr/bin/dbus-daemon --config-file=/tmp/dbus.conf --nosyslog --nopidfile & sleep 1; DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus /usr/bin/xdg-portal > /tmp/portal.log 2>&1 & sleep 1; cat /tmp/portal.log; echo ---; dbus-send --address=unix:path=/run/user/1000/bus --dest=org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.DBus.Introspectable.Introspect 2>&1; echo DONE",
-            expected: &["PORTAL_START_TEST", "owns org.freedesktop.portal.Desktop", "DONE"],
+            expected: &[
+                "PORTAL_START_TEST",
+                "owns org.freedesktop.portal.Desktop",
+                "DONE",
+            ],
             timeout_secs: 30,
             gl_only: false,
         },
@@ -213,11 +216,7 @@ fn all_tests() -> Vec<TestCase> {
         TestCase {
             name: "net_probe",
             command: "/netprobe",
-            expected: &[
-                "NETPROBE_CONNECTED",
-                "NETPROBE_GOT",
-                "NETPROBE_PASS",
-            ],
+            expected: &["NETPROBE_CONNECTED", "NETPROBE_GOT", "NETPROBE_PASS"],
             timeout_secs: 40,
             gl_only: false,
         },
@@ -357,10 +356,7 @@ fn all_tests() -> Vec<TestCase> {
         TestCase {
             name: "venus_probe",
             command: "/vkprobe",
-            expected: &[
-                "VENUS_FOUND=1",
-                "VENUS_RING1_OK",
-            ],
+            expected: &["VENUS_FOUND=1", "VENUS_RING1_OK"],
             timeout_secs: 60,
             gl_only: true,
         },
@@ -418,22 +414,22 @@ static NET_FIXTURE: std::sync::Once = std::sync::Once::new();
 
 pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result<(), String> {
     let all = all_tests();
-    
+
     // Filter by target if specified - collect into owned Vec
     let tests_to_run: Vec<TestCase> = if let Some(t) = target {
         all.into_iter().filter(|tc| tc.name == t).collect()
     } else {
         all
     };
-    
+
     if tests_to_run.is_empty() {
         return Err(format!("No test found matching '{}'", target.unwrap()));
     }
-    
+
     let mut pass_count = 0;
     let mut fail_count = 0;
     let mut skip_count = 0;
-    
+
     for tc in tests_to_run {
         // Check if test requires GL and we don't have it
         if tc.gl_only && std::env::var("DRAGOS_TEST_GL").is_err() {
@@ -441,7 +437,7 @@ pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result
             skip_count += 1;
             continue;
         }
-        
+
         // net_probe expects a host HTTP fixture on 10.0.2.2:18080; bring it up
         // on demand (the guest reaches the host through SLIRP).
         if tc.name == "net_probe" {
@@ -452,7 +448,7 @@ pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result
 
         println!("Running Test [{}]", tc.name);
         println!(" Command: {}", tc.command);
-        
+
         // Create test mode flag in EFI partition (esp/efi/boot/test_mode)
         // and on the root disk (/test_mode). The ESP is not mountable from
         // the guest (no vfat driver, mount(2) previously returned ENOSYS),
@@ -461,7 +457,8 @@ pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result
         // redirects the shell to /dev/ttyS0 so test output reaches COM1.
         let test_mode_path = root.join("esp/efi/boot/test_mode");
         let _ = std::fs::create_dir_all(test_mode_path.parent().unwrap());
-        std::fs::write(&test_mode_path, tc.command).map_err(|e| format!("Failed to write test_mode: {}", e))?;
+        std::fs::write(&test_mode_path, tc.command)
+            .map_err(|e| format!("Failed to write test_mode: {}", e))?;
         // Also write /test_mode to disk.img so draginit sees it.
         let disk_img = root.join("disk.img");
         if disk_img.exists() {
@@ -472,28 +469,32 @@ pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result
                 .arg(disk_img)
                 .output();
         }
-        
+
         // Configure QEMU for headless test
         let mut config = QemuConfig::default();
         config.headless = true;
         config.memory = "2G".to_string();
         config.smp = 2;
-        
+
         // Enable GL if required
         if tc.gl_only {
             config.gl = true;
-            unsafe { std::env::set_var("DRAGOS_TEST_GL", "1"); }
+            unsafe {
+                std::env::set_var("DRAGOS_TEST_GL", "1");
+            }
         }
-        
+
         // Spawn QEMU
-        let mut child = config.spawn_headless(root).map_err(|e| format!("Failed to spawn QEMU: {}", e))?;
-        
+        let mut child = config
+            .spawn_headless(root)
+            .map_err(|e| format!("Failed to spawn QEMU: {}", e))?;
+
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let mut stdin = child.stdin.take().unwrap();
-        
+
         let (tx, rx) = mpsc::channel();
-        
+
         // Read stdout
         let tx_stdout = tx.clone();
         let name = tc.name;
@@ -509,7 +510,7 @@ pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result
                 }
             }
         });
-        
+
         // Read stderr
         let tx_stderr = tx.clone();
         let name = tc.name;
@@ -525,7 +526,7 @@ pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result
                 }
             }
         });
-        
+
         // Wait for SHELL_READY marker, then send the test command
         let start = Instant::now();
         let timeout = Duration::from_secs(tc.timeout_secs);
@@ -533,7 +534,7 @@ pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result
         let mut timed_out = false;
         let mut child_dropped = false;
         let mut command_sent = false;
-        
+
         while start.elapsed() < timeout {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(line) => {
@@ -545,7 +546,7 @@ pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result
                         let _ = stdin.flush();
                         command_sent = true;
                     }
-                    
+
                     for (i, expected) in tc.expected.iter().enumerate() {
                         if line.contains(expected) {
                             found[i] = true;
@@ -568,27 +569,36 @@ pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result
                 }
             }
         }
-        
+
         // Kill QEMU
         let _ = child.kill();
         let _ = child.wait();
-        
+
         // Clean up test_mode
         let _ = std::fs::remove_file(&test_mode_path);
-        
+
         let all_found = found.iter().all(|&f| f);
-        
+
         if timed_out {
-            println!("\x1b[31m[FAIL] {} - timed out after {}s\x1b[0m", tc.name, tc.timeout_secs);
+            println!(
+                "\x1b[31m[FAIL] {} - timed out after {}s\x1b[0m",
+                tc.name, tc.timeout_secs
+            );
             fail_count += 1;
         } else if child_dropped && !all_found {
-            println!("\x1b[31m[FAIL] {} - QEMU exited unexpectedly\x1b[0m", tc.name);
+            println!(
+                "\x1b[31m[FAIL] {} - QEMU exited unexpectedly\x1b[0m",
+                tc.name
+            );
             fail_count += 1;
         } else if all_found {
             println!("\x1b[32m[PASS] Test '{}' passed cleanly\x1b[0m", tc.name);
             pass_count += 1;
         } else {
-            println!("\x1b[31m[FAIL] {} - expected output not found\x1b[0m", tc.name);
+            println!(
+                "\x1b[31m[FAIL] {} - expected output not found\x1b[0m",
+                tc.name
+            );
             for (i, expected) in tc.expected.iter().enumerate() {
                 if !found[i] {
                     println!("  Missing: {}", expected);
@@ -597,15 +607,15 @@ pub fn run_all_tests(root: &Path, target: Option<&str>, verbose: bool) -> Result
             fail_count += 1;
         }
     }
-    
+
     println!("\n=== Test Summary ===");
     println!("Passed: {}", pass_count);
     println!("Failed: {}", fail_count);
     println!("Skipped: {}", skip_count);
-    
+
     if fail_count > 0 {
         return Err(format!("{} test(s) failed", fail_count));
     }
-    
+
     Ok(())
 }
