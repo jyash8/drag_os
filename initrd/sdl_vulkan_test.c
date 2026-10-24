@@ -337,6 +337,30 @@ int main(int argc, char **argv) {
             break;
         }
 
+        /* Re-evaluate the window extent every frame so the swapchain matches
+         * the size Wayland actually configured (instead of staying at the
+         * 640x480 initial extent). Recreate when it changed. */
+        int d_w = 0, d_h = 0;
+        SDL_Vulkan_GetDrawableSize(win, &d_w, &d_h);
+        VkResult cap_r = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gpu, surface, &caps);
+        if (cap_r == VK_SUCCESS) {
+            VkExtent2D cand = pick_extent(win, &caps);
+            if (cand.width > 0 && cand.height > 0 &&
+                (cand.width != extent.width || cand.height != extent.height)) {
+                snprintf(b, sizeof b, "[sdl_vulkan] resize: %ux%u (was %ux%u) drawable=%dx%d\n",
+                         cand.width, cand.height, extent.width, extent.height, d_w, d_h);
+                say(b);
+                extent = cand;
+                VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gpu, surface, &caps));
+                extent = pick_extent(win, &caps);
+                swapchain = recreate_swapchain(dev, surface, extent, fmt,
+                                                image_count, pmode,
+                                                caps.currentTransform, swapchain);
+                if (swapchain == VK_NULL_HANDLE) break;
+                VK_CHECK(vkGetSwapchainImagesKHR(dev, swapchain, &sc_image_count, sc_images));
+            }
+        }
+
         uint32_t image_index;
         /* Use a finite timeout so we can pump SDL events while waiting
          * for mywima to configure the Wayland surface. Without this,

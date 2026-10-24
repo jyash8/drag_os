@@ -926,7 +926,7 @@ if command -v gcc >/dev/null 2>&1; then
     src=${spec##*:}
     if [ ! -f "$ROOT/initrd/$b" ] && [ -f "$ROOT/initrd/$src" ]; then
       # sleep.c uses dprintf, which glibc headers hide behind _GNU_SOURCE.
-      if gcc -O2 -D_GNU_SOURCE -o "$ROOT/initrd/$b" "$ROOT/initrd/$src" 2>/dev/null; then
+      if gcc -O2 -D_GNU_SOURCE -static -o "$ROOT/initrd/$b" "$ROOT/initrd/$src" 2>/dev/null; then
         echo "[build-fs] $b built from source (host gcc)"
       else
         echo "[build-fs] WARNING: could not build $b from $src" >&2
