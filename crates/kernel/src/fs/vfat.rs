@@ -165,29 +165,30 @@ impl VfatFs {
             let base = self.reserved_sectors as u64;
             for i in 0..root_secs {
                 let off = i * self.bytes_per_sector as usize;
-                let _ = self.reader.read_sector(base + (i as u64), &mut buf[off..off + self.bytes_per_sector as usize]);
             }
             parse_dir(out, &buf, self);
         }
     }
 }
 
-
-fn extract_lfn(_slot: &[u8], _out: &mut [char], _base: usize) {
-    // LFN decoding deferred.
+fn decode_lfn_slot(e: &[u8]) -> [u16;13] {
+    let mut chars = [0u16;13];
+    // layout: 1-10, 14-25, 28-31
+    for i in 0..5 { chars[i] = u16::from_le_bytes([e[1 + i*2], e[2 + i*2]]); }
+    for i in 0..6 { chars[5+i] = u16::from_le_bytes([e[14 + i*2], e[15 + i*2]]); }
+    for i in 0..2 { chars[11+i] = u16::from_le_bytes([e[28 + i*2], e[29 + i*2]]); }
+    chars
 }
 
 fn parse_dir(out: &mut Vec<(String, bool, u32, usize)>, data: &[u8], fs: &VfatFs) {
-    let mut lfn_storage = ['\0'; 255];
-    let mut lfn_count = 0;
-    let mut first_cluster_active = false;
-    let mut first_cluster = 0u32;
+    let mut lfn = [0u16; 255];
+    let mut have_lfn = false;
     for i in (0..data.len()).step_by(32) {
         if i + 32 > data.len() { break; }
         let e = &data[i..i+32];
         if e[0] == 0 { break; }
         if e[0] == 0xE5 {
-            // reset lfn on delete marker? keep
+            have_lfn = false;
             continue;
         }
         if e[11] == 0x0F {
@@ -196,32 +197,39 @@ fn parse_dir(out: &mut Vec<(String, bool, u32, usize)>, data: &[u8], fs: &VfatFs
             if ord == 0 { continue; }
             let base = (ord - 1) * 13;
             if base + 13 <= 255 {
-                extract_lfn(e, &mut lfn_storage, base);
-                lfn_count = lfn_count.max(ord * 13);
+                let chars = decode_lfn_slot(e);
+                for j in 0..13 {
+                    lfn[base + j] = chars[j];
+                }
+                have_lfn = true;
             }
             continue;
         }
-        // regular entry
-        if e[11] & 0x08 != 0 { // volume label
-            // reset
-            lfn_storage = ['\0'; 255];
-            lfn_count = 0;
+        if e[11] & 0x08 != 0 {
+            have_lfn = false;
             continue;
         }
-        let raw = &e[0..8];
-        let ext = &e[8..11];
         let mut name = String::new();
-        for &b in raw { if b == b' ' { break; } name.push(b as char); }
-        // LFN override
-        if ext.iter().any(|&x| x != b' ') && name.chars().last().map(|c| c != '.').unwrap_or(true) {
-            // append ext if not LFN
-            if !name.is_empty() && !name.contains('.') {
+        if have_lfn {
+            for &c in &lfn {
+                if c == 0 || c == 0xFFFF { break; }
+                if let Some(ch) = char::from_u32(c as u32) {
+                    name.push(ch);
+                }
+            }
+        }
+        if name.is_empty() {
+            let raw = &e[0..8];
+            let ext = &e[8..11];
+            for &b in raw { if b == b' ' { break; } name.push(b as char); }
+            if ext.iter().any(|&x| x != b' ') {
                 name.push('.');
                 for &b in ext { if b == b' ' { break; } name.push(b as char); }
             }
         }
-        if name.is_empty() || name == "." || name == ".." { 
-            lfn_storage = ['\0';255]; lfn_count=0; continue;
+        if name.is_empty() || name == "." || name == ".." {
+            have_lfn = false;
+            continue;
         }
         let is_dir = e[11] & 0x10 != 0;
         let hi = u16::from_le_bytes([e[20], e[21]]) as u32;
@@ -229,9 +237,11 @@ fn parse_dir(out: &mut Vec<(String, bool, u32, usize)>, data: &[u8], fs: &VfatFs
         let cluster = (hi << 16) | lo;
         let size = u32::from_le_bytes([e[28], e[29], e[30], e[31]]) as usize;
         out.push((name, is_dir, cluster, size));
+        have_lfn = false;
         let _ = fs;
     }
 }
+
 
 
 #[derive(Clone)]
