@@ -112,6 +112,31 @@ pub extern "C" fn module_tick_count() -> u64 {
 /// the whole surface at a glance.
 static EXPORTS: SpinLock<Option<Vec<KernelSymbol>>> = SpinLock::new(None);
 
+
+/// LinuxKPI baseline allocator: allocate a zeroed-ish block of memory from the
+/// global allocator. Used only by loadable modules as a small convenience
+/// surface; it is not the production kmalloc.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lk_malloc(size: usize) -> *mut u8 {
+    if size == 0 {
+        return core::ptr::null_mut();
+    }
+    let layout = alloc::alloc::Layout::from_size_align(size, 16).unwrap();
+    unsafe { alloc::alloc::alloc(layout) }
+}
+
+/// LinuxKPI baseline free.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lk_free(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    // `dealloc` needs the same layout; modules using this must pass the
+    // original pointer without further bookkeeping for now.
+    let layout = alloc::alloc::Layout::new::<u8>();
+    unsafe { alloc::alloc::dealloc(ptr, layout) }
+}
+
 fn export_table() -> Vec<KernelSymbol> {
     vec![
         KernelSymbol { name: "dprintln_fmt", addr: dprintln_fmt as *const () as u64 },
@@ -125,6 +150,8 @@ fn export_table() -> Vec<KernelSymbol> {
         // value (see the note on TICKS_VALUE below).
         KernelSymbol { name: "TICKS", addr: ticks_addr as *const () as u64 },
         KernelSymbol { name: "KEYBOARD_DEV", addr: keyboard_dev_addr as *const () as u64 },
+        KernelSymbol { name: "lk_malloc", addr: lk_malloc as *const () as u64 },
+        KernelSymbol { name: "lk_free", addr: lk_free as *const () as u64 },
     ]
 }
 
@@ -315,3 +342,4 @@ pub fn log_exports() {
         crate::dprintln!("[module]   export {:#x} {}", s.addr, s.name);
     }
 }
+
