@@ -25,6 +25,7 @@ OPTIONS:
     --gdb               (for run/qemu) Start QEMU with GDB stub on port 1234
     --no-audio          (for run/qemu) Disable audio devices
     --no-gl             (for run/qemu) Software display (virtio-vga + gtk, no virgl)
+    --sdl               (for run/qemu) Use SDL display frontend instead of GTK when GL is on
     --trace             (for run/qemu) Enable CPU reset/interrupt tracing
                         (virgl host GPU is always on: virtio-vga-gl + gtk,gl=on)
     --mem <SIZE>        (for run/qemu) Custom memory size (default: 2G)
@@ -80,6 +81,7 @@ fn main() {
                     // ponytail: virgl-vs-2D isolation for display artifacts
                     // (guest sends identical bytes; only host read path differs).
                     "--no-gl" => config.gl = false,
+                    "--sdl" => config.sdl = true,
                     "--trace" => config.trace = true,
                     "--mem" if i + 1 < args.len() => {
                         config.memory = args[i + 1].clone();

@@ -10,6 +10,7 @@ pub struct QemuConfig {
     pub trace: bool,
     pub headless: bool,
     pub gl: bool,
+    pub sdl: bool,
     pub extra_args: Vec<String>,
 }
 
@@ -26,6 +27,7 @@ impl Default for QemuConfig {
             // auto-selects virpipe via the esp virgl flag. Software
             // rendering (llvmpipe) is too slow for video/compositing.
             gl: true,
+            sdl: false,
             extra_args: Vec::new(),
         }
     }
@@ -174,7 +176,11 @@ impl QemuConfig {
             if let Ok(spec) = std::env::var("DRAGOS_QEMU_DISPLAY") {
                 cmd.args(["-display", &spec]);
             } else if !self.headless || want_window {
-                cmd.args(["-display", "gtk,gl=on"]);
+                if self.sdl {
+                    cmd.args(["-display", "sdl,gl=on"]);
+                } else {
+                    cmd.args(["-display", "gtk,gl=on"]);
+                }
                 // ponytail: DRAGOS_FULLSCREEN=1 for unattended visual checks.
                 // A virgl scanout cannot be captured with `screendump` (the host
                 // reports "no surface" once the guest programs the scanout), so
@@ -209,7 +215,11 @@ impl QemuConfig {
         } else {
             cmd.args(["-device", "virtio-vga,xres=1280,yres=800"]);
             if !self.headless {
-                cmd.args(["-display", "gtk"]);
+                if self.sdl {
+                    cmd.args(["-display", "sdl"]);
+                } else {
+                    cmd.args(["-display", "gtk"]);
+                }
             }
         }
 
