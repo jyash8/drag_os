@@ -11,7 +11,6 @@
 #ifndef __NR_init_module
 #define __NR_init_module 175
 #endif
-
 #ifndef __NR_finit_module
 #define __NR_finit_module 313
 #endif
@@ -30,16 +29,28 @@ int main(int argc, char **argv) {
     const char *path = argv[1];
     int fd = open(path, O_RDONLY);
     if (fd < 0) fail("open failed");
+
+    /* Prefer the modern fd-based loader first. */
+    long r = syscall(__NR_finit_module, fd, "", 0);
+    close(fd);
+    if (r == 0) {
+        printf("insmod: '%s' loaded successfully (finit_module)\n", path);
+        return 0;
+    }
+
+    /* Fall back to the raw-image path. */
+    fd = open(path, O_RDONLY);
+    if (fd < 0) fail("open failed");
     struct stat st;
     if (fstat(fd, &st) != 0) fail("stat failed");
-    if (st.st_size < 0 || st.st_size > 32 * 1024 * 1024) {
+    if (st.st_size <= 0 || st.st_size > 32 * 1024 * 1024) {
         fprintf(stderr, "insmod: file too large or empty\n");
         close(fd);
         return 1;
     }
     size_t len = (size_t)st.st_size;
     void *buf = malloc(len);
-    if (!len || !buf) { close(fd); fail("alloc failed"); }
+    if (!buf) { close(fd); fail("alloc failed"); }
     size_t off = 0;
     while (off < len) {
         ssize_t n = read(fd, (char*)buf + off, len - off);
@@ -48,12 +59,12 @@ int main(int argc, char **argv) {
     }
     close(fd);
 
-    long r = syscall(__NR_init_module, buf, len, "");
+    long r2 = syscall(__NR_init_module, buf, len, "");
     free(buf);
-    if (r < 0) {
-        fprintf(stderr, "insmod: init_module failed, errno=%d\n", errno);
+    if (r2 < 0) {
+        fprintf(stderr, "insmod: init_module failed (errno=%d) after finit_module errno\\n", errno);
         return 1;
     }
-    printf("insmod: '%s' loaded successfully\n", path);
+    printf("insmod: '%s' loaded successfully (init_module)\\n", path);
     return 0;
 }
