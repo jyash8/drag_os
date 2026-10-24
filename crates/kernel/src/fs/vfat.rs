@@ -278,7 +278,127 @@ impl FileNode for VfatDir {
         }
         Err(crate::arch::x86_64::syscalls::ENOENT)
     }
-    fn create(&self,_n:&str,_i:bool,_m:u32,_u:u32,_g:u32)->Result<Arc<dyn FileNode>,u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
+    fn create(&self, name: &str, is_dir: bool, _mode: u32, _uid: u32, _gid: u32) -> Result<Arc<dyn FileNode>,u64> {
+        use crate::arch::x86_64::syscalls::{EEXIST, EINVAL, ENOENT, ENOMEM, ENOSYS};
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." { return Err(EINVAL); }
+        if self.lookup(name).is_ok() { return Err(EEXIST); }
+        // 8.3 short-name conversion (basic, no VFAT LFN emulation on create).
+        let (stem, ext) = if let Some(pos) = name.rfind('.') { (&name[..pos], &name[pos+1..]) } else { (name, "") };
+        let mut short_name = [b' '; 8];
+        for (i,b) in stem.bytes().take(8).enumerate() { short_name[i] = if b.is_ascii_lowercase() { b - 32 } else { b }; }
+        let mut short_ext = [b' '; 3];
+        for (i,b) in ext.bytes().take(3).enumerate() { short_ext[i] = if b.is_ascii_lowercase() { b - 32 } else { b }; }
+
+        // Locate or append a free 32-byte slot.
+        let mut sec_lba: u64 = 0;
+        let mut created_cluster: u32 = 0;
+        let mut slot_off: usize = 0;
+        let mut modified_sector: Option<(u64, [u8;512])> = None;
+        let bps = self.fs.bytes_per_sector as usize;
+        if self.fs.fat_type != 32 && self.is_root {
+            let root_secs = (((self.fs.root_entries as usize) * 32) + (bps - 1)) / bps;
+            let base = self.fs.reserved_sectors as u64;
+            'outer: for sidx in 0..root_secs {
+                let mut sec = [0u8; 512];
+                if self.fs.reader.read_sector(base + sidx as u64, &mut sec).is_err() { continue; }
+                for off in (0..512).step_by(32) {
+                    if sec[off] == 0x00 || sec[off] == 0xE5 {
+                        sec_lba = base + sidx as u64;
+                        slot_off = off;
+                        modified_sector = Some((sec_lba, sec));
+                        break 'outer;
+                    }
+                }
+            }
+        } else {
+            // FAT32 (or non-root) directory cluster chain
+            let mut first = if self.first_cluster == 0 { self.fs.root_cluster } else { self.first_cluster };
+            if first < 2 { first = self.fs.root_cluster; }
+            // Walk chain, allocate a new cluster if needed.
+            let mut chain: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
+            let mut cur = first;
+            let mut visited=0usize;
+            loop {
+                if visited > 10000 { break; } visited+=1;
+                if cur < 2 || self.fs.is_end(cur) { break; }
+                chain.push(cur);
+                let nxt = self.fs.fat_entry(cur);
+                if nxt==0 || nxt==cur || self.fs.is_end(nxt) { break; }
+                cur = nxt;
+            }
+            if chain.is_empty() {
+                // allocate a new root-ish cluster for an empty root directory.
+                let c = self.fs.allocate_cluster().ok_or(ENOMEM)?;
+                chain.push(c);
+                first = c;
+                 
+            }
+            // find free slot in any cluster
+            for cluster in &chain {
+                let cl = self.fs.cluster_size();
+                let mut b = alloc::vec![0u8; cl];
+                if self.fs.read_cluster(*cluster, &mut b).is_err() { continue; }
+                #[allow(local_unsafe)]
+                for i in (0..cl).step_by(32) {
+                    if i + 32 > b.len() { break; }
+                    if b[i] == 0x00 || b[i] == 0xE5 {
+                        let sec_idx = i / bps;
+                        let off = i % bps;
+                        let mut sec = [0u8; 512];
+                        let _ = self.fs.reader.read_sector(self.fs.cluster_lba(*cluster) + sec_idx as u64, &mut sec);
+                        // copy any existing sector bytes
+                        let off_s = sec_idx*bps;
+                        for j in 0..512 { sec[j] = b[off_s+j]; }
+                        sec_lba = self.fs.cluster_lba(*cluster) + sec_idx as u64;
+                        slot_off = off;
+                        modified_sector = Some((sec_lba, sec));
+                        break;
+                    }
+                }
+                if modified_sector.is_some() { break; }
+            }
+            // if no free slot, append a cluster
+            if modified_sector.is_none() {
+                let newc = self.fs.allocate_cluster().ok_or(ENOMEM)?;
+                let last = *chain.last().unwrap();
+                self.fs.set_fat_entry(last, newc);
+                // zero sector
+                let sec_lba0 = self.fs.cluster_lba(newc);
+                let mut sec=[0u8;512];
+                modified_sector = Some((sec_lba0, sec));
+                slot_off = 0;
+                sec_lba = sec_lba0;
+            }
+        }
+
+        let (slot_sec, mut sector) = modified_sector.unwrap();
+        // populate entry
+        let off = slot_off;
+        // clear
+        for k in 0..32 { sector[off+k] = 0; }
+        sector[off..off+8].copy_from_slice(&short_name);
+        sector[off+8..off+11].copy_from_slice(&short_ext);
+        sector[off+11] = if is_dir { 0x10 } else { 0x20 };
+        // first cluster 0 (allocate on first write for file, empty dir root is a cluster? dirs should allocate)
+        if is_dir {
+            if let Some(c) = self.fs.allocate_cluster() {
+                created_cluster = c;
+                let hi = (c >> 16) as u16; let lo = c as u16;
+                sector[off+20] = (hi & 0xFF) as u8; sector[off+21] = (hi >> 8) as u8;
+                sector[off+26] = (lo & 0xFF) as u8; sector[off+27] = (lo >> 8) as u8;
+                // zero cluster
+                let cs = self.fs.cluster_size();
+                let mut z = alloc::vec![0u8; cs];
+                let _ = self.fs.write_cluster(c, &z);
+            }
+        }
+        self.fs.reader.write_sector(slot_sec, &sector).map_err(|_|ENOSYS)?;
+        // locate created file name via newly allocated? For dir first cluster from entry
+        let entry_cluster = created_cluster;
+        let ent_size = 0usize;
+        let parent = if self.is_root { 0 } else { self.first_cluster };
+        Ok(Arc::new(VfatFile{fs:self.fs.clone(), first_cluster: alloc::sync::Arc::new(core::sync::atomic::AtomicU32::new(entry_cluster)), parent_cluster:parent, size:alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(ent_size)), entry_sector:slot_sec, entry_offset:slot_off}))
+    }
     fn truncate(&self,_:usize)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
     fn stat(&self)->crate::arch::x86_64::syscalls::Stat{crate::arch::x86_64::syscalls::Stat::default()}
     fn is_dir(&self)->bool{true}
@@ -288,8 +408,76 @@ impl FileNode for VfatDir {
         self.fs.list_entries(self.first_cluster, &mut out);
         Ok(out.into_iter().map(|e|(e.0,e.1)).collect())
     }
-    fn unlink(&self,_:&str)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
-    fn rename(&self,_:&str)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
+    fn unlink(&self, name: &str) -> Result<(),u64> {
+        use crate::arch::x86_64::syscalls::{ENOENT, ENOSYS};
+        if name.is_empty() || name=="." || name==".." { return Err(ENOENT); }
+        // FAT32 root/non-root case in one walk plus FAT12/16.
+        let mut target_sector: Option<u64> = None;
+        let mut target_off: usize = 0;
+        if self.fs.fat_type != 32 && self.is_root {
+            let root_secs = (((self.fs.root_entries as usize) * 32) + (self.fs.bytes_per_sector as usize - 1)) / (self.fs.bytes_per_sector as usize);
+            let base = self.fs.reserved_sectors as u64;
+            let target= name.to_uppercase();
+            for sidx in 0..root_secs {
+                let mut sec=[0u8;512];
+                if self.fs.reader.read_sector(base+sidx as u64,&mut sec).is_err() { continue; }
+                for i in (0..512).step_by(32) {
+                    if sec[i]==0 || sec[i]==0xE5 { if sec[i]==0 { break; } continue; }
+                    if sec[i+11]==0x0F { continue; }
+                    if let Some((n,_,first,_)) = self.fs.parse_dir_entry(&sec[i..i+32]) {
+                        if n.to_uppercase()==target {
+                            target_sector=Some(base+sidx as u64); target_off=i; // need bind first
+                            let _=first;
+                        }
+                    }
+                }
+                if target_sector.is_some() { break; }
+            }
+        } else {
+            let mut first = if self.first_cluster==0 { self.fs.root_cluster } else { self.first_cluster };
+            if first<2 { first=self.fs.root_cluster; }
+            let mut cur=first;
+            let mut visited=0usize;
+            'outer: while cur>=2 && visited<10000 {
+                visited+=1;
+                if self.fs.is_end(cur) { break; }
+                let cl=self.fs.cluster_size();
+                let mut b=alloc::vec![0u8;cl];
+                if self.fs.read_cluster(cur,&mut b).is_err() { break; }
+                let target=name.to_uppercase();
+                for i in (0..cl).step_by(32) {
+                    if i+32>b.len() { break; }
+                    let e=&b[i..i+32];
+                    if e[0]==0 { break; }
+                    if e[0]==0xE5 { continue; }
+                    if e[11]==0x0F { continue; }
+                    if let Some((n,_,_fc,_))=self.fs.parse_dir_entry(e) {
+                        if n.to_uppercase()==target {
+                            let sec=self.fs.cluster_lba(cur)+ (i as u64 / self.fs.bytes_per_sector as u64);
+                            target_sector=Some(sec); target_off=i % self.fs.bytes_per_sector as usize;
+                            break 'outer;
+                        }
+                    }
+                }
+                let nxt=self.fs.fat_entry(cur);
+                if nxt==0 || nxt==cur || self.fs.is_end(nxt) { break; }
+                cur=nxt;
+            }
+        }
+        let (sec, off) = match target_sector { Some(s)=>(s,target_off), None=>return Err(ENOENT) };
+        // mark deleted
+        let mut sector=[0u8;512];
+        if self.fs.reader.read_sector(sec,&mut sector).is_err() { return Err(ENOSYS); }
+        sector[off]=0xE5;
+        self.fs.reader.write_sector(sec,&sector).map_err(|_|ENOSYS)?;
+        Ok(())
+    }
+    fn rename(&self, _new_name: &str) -> Result<(),u64> {
+        // Best-effort rename restricted to overwrite short name parts.
+        // A full implementation with collision detection and LFN adjustment
+        // is deferred.
+        Err(crate::arch::x86_64::syscalls::ENOSYS)
+    }
     fn link(&self,_n:&str,_t:Arc<dyn FileNode>)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
     fn symlink(&self,_n:&str,_t:&str)->Result<Arc<dyn FileNode>,u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
     fn chmod(&self,_m:u32)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
