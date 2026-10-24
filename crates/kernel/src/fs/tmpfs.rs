@@ -9,6 +9,8 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::fs::vfs::FileNode;
+use crate::memory::dsocache;
+use shared::boot::boot_info::HHDM_BASE;
 
 pub struct TmpFsNode {
     inner: Arc<SpinLock<TmpInner>>,
@@ -155,16 +157,27 @@ impl FileNode for TmpFsNode {
             return Ok(0);
         }
         let n = (inner.size - offset).min(buf.len());
-        // Holes read as zeros.
-        buf[..n].fill(0);
+        // Holes read as zeros, unless the page was faulted in via demand
+        // paging (mmap) by another process and cached in the DSO cache.  That
+        // path shares physical frames between processes: a client that writes
+        // to a memfd through mmap populates a DSO-cached frame, and a
+        // compositor that reads the same memfd through read() must see those
+        // bytes, not the tmpfs hole.
         let mut done = 0;
         while done < n {
             let pos = offset + done;
             let page_no = (pos / TMPFS_PAGE) as u64;
             let page_off = pos % TMPFS_PAGE;
             let chunk = (TMPFS_PAGE - page_off).min(n - done);
-            if let Some(page) = inner.pages.get(&page_no) {
+            if let Some(frame) = dsocache::lookup_and_retain(self.cache_id, page_no) {
+                let frame_va = (frame.0 + HHDM_BASE.0) as *const u8;
+                let page_data = unsafe { core::slice::from_raw_parts(frame_va, TMPFS_PAGE) };
+                buf[done..done + chunk].copy_from_slice(&page_data[page_off..page_off + chunk]);
+                dsocache::release(self.cache_id, page_no);
+            } else if let Some(page) = inner.pages.get(&page_no) {
                 buf[done..done + chunk].copy_from_slice(&page[page_off..page_off + chunk]);
+            } else {
+                buf[done..done + chunk].fill(0);
             }
             done += chunk;
         }
