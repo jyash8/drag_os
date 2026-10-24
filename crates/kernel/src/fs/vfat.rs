@@ -530,7 +530,7 @@ impl FileNode for VfatFile {
     fn size(&self) -> usize { self.size.load(core::sync::atomic::Ordering::SeqCst) }
     fn list_dir(&self) -> Result<Vec<(String, bool)>, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn unlink(&self, _: &str) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn rename(&self, _: &str) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
+    fn rename(&self, new_name: &str) -> Result<(), u64> { self.fs.rename_wrap(self, new_name) }
     fn link(&self, _n: &str, _t: Arc<dyn FileNode>) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn symlink(&self, _n: &str, _t: &str) -> Result<Arc<dyn FileNode>, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn chmod(&self, _m: u32) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
@@ -785,6 +785,105 @@ impl VfatFs {
         file.size.store(new_size, core::sync::atomic::Ordering::SeqCst);
         if new_size % cl_size != 0 && needed > 0 {
             // truncate logical tail; physical sector leaves zeros (already allocated page)
+        }
+        Ok(())
+    }
+}
+
+impl VfatFs {
+    pub fn rename_wrap(&self, file: &VfatFile, new_name: &str) -> Result<(), u64> {
+        use crate::arch::x86_64::syscalls::{EEXIST, ENOENT, ENOSYS, EINVAL};
+        if new_name.is_empty() || new_name.contains('/') || new_name=="." || new_name==".." { return Err(EINVAL); }
+        // 8.3 target
+        let (stem, ext) = if let Some(pos)=new_name.rfind('.') { (&new_name[..pos], &new_name[pos+1..]) } else { (new_name, "") };
+        let mut short_name=[b' ';8];
+        for (i,b) in stem.bytes().take(8).enumerate() { short_name[i]=if b.is_ascii_lowercase(){b-32}else{b}; }
+        let mut short_ext=[b' ';3];
+        for (i,b) in ext.bytes().take(3).enumerate() { short_ext[i]=if b.is_ascii_lowercase(){b-32}else{b}; }
+
+        // check duplicate
+        let mut chain=alloc::vec::Vec::new();
+        let parent = file.parent_cluster;
+        let mut cur = if parent==0 { self.root_cluster } else { parent };
+        if cur < 2 { cur = self.root_cluster; }
+        let mut visited=0usize;
+        while cur>=2 && visited<10000 {
+            visited+=1;
+            if self.is_end(cur) { break; }
+            chain.push(cur);
+            let n=self.fat_entry(cur);
+            if n==0 || n==cur || self.is_end(n) { break; }
+            cur=n;
+        }
+        // duplicate scan
+        for cluster in &chain {
+            let cl=self.cluster_size();
+            let mut b=alloc::vec![0u8;cl];
+            if self.read_cluster(*cluster,&mut b).is_err() { continue; }
+            for i in (0..cl).step_by(32) {
+                if i+32>b.len(){break;}
+                let e=&b[i..i+32];
+                if e[0]==0||e[0]==0xE5 { if e[0]==0 { break; } continue; }
+                if e[11]==0x0F { continue; }
+                if let Some((n,_,_,_))=self.parse_dir_entry(e) {
+                    if n.to_uppercase()==new_name.to_uppercase() { return Err(EEXIST); }
+                }
+            }
+        }
+        // locate old entry
+        let old = self.locate_entry(parent, file.first_cluster.load(core::sync::atomic::Ordering::SeqCst));
+        let old=(old.ok_or(ENOENT)?);
+        // find free slot (possibly append)
+        let mut sec_lba=0u64;
+        let mut slot_off=0usize;
+        let mut new_sector: Option<[u8;512]> = None;
+        for cluster in &chain {
+            let cl=self.cluster_size();
+            let mut b=alloc::vec![0u8;cl];
+            if self.read_cluster(*cluster,&mut b).is_err() { continue; }
+            for i in (0..cl).step_by(32) {
+                if i+32>b.len(){break;}
+                if b[i]==0x00 || b[i]==0xE5 {
+                    let sid=i/(self.bytes_per_sector as usize);
+                    let off=i%(self.bytes_per_sector as usize);
+                    let mut sec=[0u8;512];
+                    let _=self.reader.read_sector(self.cluster_lba(*cluster)+sid as u64,&mut sec);
+                    sec_lba=self.cluster_lba(*cluster)+sid as u64;
+                    slot_off=off;
+                    new_sector=Some(sec);
+                    break;
+                }
+            }
+            if new_sector.is_some() { break; }
+        }
+        if new_sector.is_none() {
+            // append new cluster
+            match chain.last() {
+                Some(last) => {
+                    if let Some(c)= self.allocate_cluster() {
+                        self.set_fat_entry(*last,c);
+                        let mut sec=[0u8;512];
+                        new_sector=Some(sec);
+                        sec_lba=self.cluster_lba(c);
+                        slot_off=0;
+                    }
+                }
+                None => {}
+            }
+        }
+        let mut sector = new_sector.ok_or(crate::arch::x86_64::syscalls::ENOMEM)?;
+        // copy old entry into new slot, rewrite name
+        let mut oldsec=[0u8;512];
+        self.reader.read_sector(old.0,&mut oldsec).ok();
+        for k in 0..32 { sector[slot_off+k]=oldsec[old.1+k]; }
+        sector[slot_off..slot_off+8].copy_from_slice(&short_name);
+        sector[slot_off+8..slot_off+11].copy_from_slice(&short_ext);
+        self.reader.write_sector(sec_lba,&sector).map_err(|_|ENOSYS)?;
+        // delete old slot
+        let mut oldsec2=[0u8;512];
+        if self.reader.read_sector(old.0,&mut oldsec2).is_ok() {
+            oldsec2[old.1]=0xE5;
+            let _=self.reader.write_sector(old.0,&oldsec2);
         }
         Ok(())
     }
