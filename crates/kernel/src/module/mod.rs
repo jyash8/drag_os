@@ -123,7 +123,55 @@ pub fn sys_init_module(image: u64, len: usize, _uargs: u64) -> u64 {
 /// Read a module blob through an fd-based kernel file path and hand it to the
 /// loader.  Permission check is the opener's; this mostly exists for symmetry.
 pub fn sys_finit_module(fd: i32, _uargs: u64, _flags: i32) -> u64 {
-    // Minimal fallback until file-backed fd loading is wired.
-    let _ = fd;
-    crate::arch::x86_64::syscalls::ENOSYS
+    use crate::arch::x86_64::syscalls::{EACCES, EBADF, EFAULT, EINVAL, ENOMEM, EPERM, ESRCH};
+    use crate::tasks;
+
+    let thread = match tasks::current_thread() {
+        Some(t) => t,
+        None => return ESRCH,
+    };
+    if fd < 0 {
+        return EBADF;
+    }
+    let (pid, open_file) = {
+        let p = thread.process.lock();
+        if p.euid != 0 {
+            return EPERM;
+        }
+        let Some(slot) = p.fd_table.get(fd as usize).cloned().flatten() else {
+            return EBADF;
+        };
+        (p.pid, slot)
+    };
+    _ = pid;
+
+    // Drain the file into a contiguous buffer.
+    const MAX_MODULE_LEN: usize = 32 * 1024 * 1024;
+    let mut data: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if data.len() >= MAX_MODULE_LEN {
+            return ENOMEM;
+        }
+        let n = match open_file.lock().read(&mut chunk, 0) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => return EACCES,
+        };
+        let new_len = data.len().saturating_add(n);
+        if new_len > MAX_MODULE_LEN {
+            return ENOMEM;
+        }
+        if data.capacity() < new_len {
+            match data.try_reserve_exact(n) {
+                Ok(()) => {}
+                Err(_) => return ENOMEM,
+            }
+        }
+        data.extend_from_slice(&chunk[..n]);
+    }
+    if data.is_empty() {
+        return EINVAL;
+    }
+    load_bytes(&data)
 }
