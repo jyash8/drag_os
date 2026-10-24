@@ -842,7 +842,26 @@ extern "x86-interrupt" fn gpf_handler(
 extern "x86-interrupt" fn invalid_opcode_handler(
     stack_frame: crate::arch::x86_64::idt::InterruptStackFrame,
 ) {
-    panic!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
+    let from_user = (stack_frame.code_segment & 3) == 3;
+    if from_user {
+        unsafe { core::arch::asm!("swapgs", options(nostack, preserves_flags)) };
+        let pid = crate::smp::CPUS[crate::smp::current_cpu_id() as usize]
+            .try_lock()
+            .and_then(|slot| {
+                slot.as_ref()
+                    .and_then(|c| c.current.as_ref())
+                    .map(|t| t.process.try_lock().map(|p| p.pid).unwrap_or(0))
+            })
+            .unwrap_or(0);
+        crate::println!(
+            "[INVALID-OPCODE] user pid={} rip={:#x} -> SIGILL",
+            pid,
+            stack_frame.instruction_pointer,
+        );
+        crate::tasks::exit_current_thread(128 + 4);
+    } else {
+        panic!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
+    }
 }
 
 /// Called from the PS/2 keyboard driver when Ctrl+C is pressed. Sets SIGINT
