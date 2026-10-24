@@ -24,7 +24,30 @@ pub struct Mount {
     pub open_count: AtomicUsize,
 }
 
+pub struct MountNamespace {
+    /// Process-rooted mount list. Initially shared with the global table.
+    pub mounts: SpinLock<Vec<Arc<Mount>>>,
+    /// Parent namespace used for copy-on-open or pivot_root.
+    pub parent: Option<Arc<MountNamespace>>,
+}
+
+impl MountNamespace {
+    pub fn new_empty() -> Self {
+        Self {
+            mounts: SpinLock::new(Vec::new()),
+            parent: None,
+        }
+    }
+}
+
+/// Global root namespace per tasks process. Per-process binding lands later.
+pub static ROOT_MOUNT_NAMESPACE: MountNamespace = MountNamespace {
+    mounts: SpinLock::new(Vec::new()),
+    parent: None,
+};
+
 pub static MOUNTS: SpinLock<Vec<Arc<Mount>>> = SpinLock::new(Vec::new());
+pub static ROOT_NS_MOUNTS: SpinLock<Vec<Arc<Mount>>> = SpinLock::new(Vec::new());
 
 pub fn resolve_mount(canonical: &str) -> Option<(Arc<Mount>, String)> {
     let mounts = MOUNTS.lock();
