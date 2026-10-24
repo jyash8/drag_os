@@ -48,6 +48,11 @@ impl QemuConfig {
         // Use KVM acceleration if available
         if Path::new("/dev/kvm").exists() {
             cmd.arg("-enable-kvm");
+            // Expose the host's full CPU feature set. DragOS runs many
+            // dynamically-linked userspace binaries (glibc/wayland stack);
+            // advertising only qemu64's subset makes IFUNC selection pick
+            // routines that fault on unsupported instructions.
+            cmd.arg("-cpu").arg("host");
         }
 
         cmd.arg("-smp").arg(self.smp.to_string());
