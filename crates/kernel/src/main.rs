@@ -29,6 +29,7 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
     // Mount the Ext2 root filesystem
     let mounted = kernel::fs::mount_root();
     kernel::fs::mount::register_pseudo_mounts();
+    kernel::fs::mount::ensure_root_namespace();
 
     // Always register the initrd so we can free it after a successful mount.
     let boot_info = unsafe { &*boot_info };

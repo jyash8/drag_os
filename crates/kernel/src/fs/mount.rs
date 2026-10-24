@@ -24,32 +24,14 @@ pub struct Mount {
     pub open_count: AtomicUsize,
 }
 
-pub struct MountNamespace {
-    /// Process-rooted mount list. Initially shared with the global table.
-    pub mounts: SpinLock<Vec<Arc<Mount>>>,
-    /// Parent namespace used for copy-on-open or pivot_root.
-    pub parent: Option<Arc<MountNamespace>>,
-}
-
-impl MountNamespace {
-    pub fn new_empty() -> Self {
-        Self {
-            mounts: SpinLock::new(Vec::new()),
-            parent: None,
-        }
-    }
-}
-
-/// Global root namespace per tasks process. Per-process binding lands later.
-pub static ROOT_MOUNT_NAMESPACE: MountNamespace = MountNamespace {
-    mounts: SpinLock::new(Vec::new()),
-    parent: None,
-};
-
 pub static MOUNTS: SpinLock<Vec<Arc<Mount>>> = SpinLock::new(Vec::new());
 pub static ROOT_NS_MOUNTS: SpinLock<Vec<Arc<Mount>>> = SpinLock::new(Vec::new());
 
 pub fn resolve_mount(canonical: &str) -> Option<(Arc<Mount>, String)> {
+    // Prefer a per-process namespace once the struct landed; fall back to
+    // the global root. `MOUNTS` is retained as a bootstrap alias for the
+    // constructors that only carry it.
+    let _bootstrap = crate::fs::mount::ensure_root_namespace();
     let mounts = MOUNTS.lock();
     let mut best: Option<(usize, Arc<Mount>)> = None;
     for m in mounts.iter() {
@@ -257,6 +239,7 @@ pub fn register_pseudo_mounts() {
         };
         let _ = mount_add(m);
     }
+    ensure_root_namespace();
 }
 pub fn record_open(path: &str) {
     let canonical = crate::fs::canonicalize_path("/", path);
@@ -273,4 +256,75 @@ pub fn record_close(path: &str) {
             m.open_count.fetch_sub(1, Ordering::Relaxed);
         }
     }
+}
+/// Root for per-process namespaces. Initially backed by the global mount list.
+pub struct MountNamespace {
+    pub mounts: SpinLock<Vec<Arc<Mount>>>,
+    pub parent: Option<Arc<MountNamespace>>,
+}
+
+pub static ROOT_MOUNT_NAMESPACE: SpinLock<Option<Arc<MountNamespace>>> =
+    SpinLock::new(None);
+
+pub fn ensure_root_namespace() -> Arc<MountNamespace> {
+    if let Some(ns) = ROOT_MOUNT_NAMESPACE.lock().as_ref().cloned() {
+        return ns;
+    }
+    let mounts = {
+        let mut m = MOUNTS.lock();
+        core::mem::replace(&mut *m, Vec::new())
+    };
+    let ns = Arc::new(MountNamespace {
+        mounts: SpinLock::new(mounts),
+        parent: None,
+    });
+    *ROOT_MOUNT_NAMESPACE.lock() = Some(ns.clone());
+    ns
+}
+
+pub fn current_mounts() -> Arc<MountNamespace> {
+    ensure_root_namespace()
+}
+
+pub fn resolve_mount_in(ns: &Arc<MountNamespace>, canonical: &str) -> Option<(Arc<Mount>, String)> {
+    let mounts = ns.mounts.lock();
+    let mut best: Option<(usize, Arc<Mount>)> = None;
+    for m in mounts.iter() {
+        let mp = &m.mountpoint;
+        if is_pseudo(m.fstype) { continue; }
+        let matches = if mp == "/" { true }
+        else if canonical == *mp { true }
+        else { canonical.starts_with(mp.as_str()) && canonical.as_bytes().get(mp.len()) == Some(&b'/') };
+        if matches {
+            let len = mp.len();
+            if best.as_ref().map_or(true, |(bl, _)| len > *bl) {
+                best = Some((len, Arc::clone(m)));
+            }
+        }
+    }
+    drop(mounts);
+    best.map(|(_, m)| {
+        let rel = if m.mountpoint == "/" {
+            canonical.trim_start_matches('/').to_string()
+        } else if canonical == m.mountpoint {
+            String::new()
+        } else {
+            canonical[m.mountpoint.len()..].trim_start_matches('/').to_string()
+        };
+        (m, rel)
+    })
+}
+
+pub fn current_ns() -> Arc<MountNamespace> {
+    if let Some(t) = crate::tasks::current_thread() {
+        let p = t.process.lock();
+        if let Some(ns) = p.ns.clone() {
+            return ns;
+        }
+    }
+    ensure_root_namespace()
+}
+
+pub fn resolve_mount_current(canonical: &str) -> Option<(Arc<Mount>, String)> {
+    resolve_mount_in(&current_ns(), canonical)
 }

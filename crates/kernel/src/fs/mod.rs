@@ -254,7 +254,7 @@ pub fn lookup_relative_to_checked(cwd: &str, path: &str) -> Result<VNode, Lookup
     // Phase 1: consult the mount table before the legacy hardcoded arms.
     // Pseudo-filesystems (proc/sysfs/devtmpfs/tmpfs) are skipped here and
     // resolved by the arms below.
-    if let Some((mnt, rel)) = crate::fs::mount::resolve_mount(&canonical) {
+    if let Some((mnt, rel)) = crate::fs::mount::resolve_mount_current(&canonical) {
         if mnt.mountpoint != "/" {
             if rel.is_empty() {
                 let vnode = VNode::FsNode { node: mnt.root.clone(), cursor: 0 };
@@ -615,7 +615,7 @@ pub fn create(path: &str, is_dir: bool, mode: u32) -> Option<VNode> {
     };
 
     // Phase 1: consult the mount table for real filesystems.
-    if let Some((mnt, rel)) = crate::fs::mount::resolve_mount(&canonical) {
+    if let Some((mnt, rel)) = crate::fs::mount::resolve_mount_current(&canonical) {
         if mnt.mountpoint != "/" && !rel.is_empty() {
             let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
             if !parts.is_empty() {

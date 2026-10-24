@@ -287,6 +287,7 @@ pub struct Process {
     /// at most one controlling terminal, which is the rule `TIOCSCTTY` enforces.
     pub ctty_owner_sid: u64,
     pub cwd: String,
+    pub ns: Option<alloc::sync::Arc<crate::fs::mount::MountNamespace>>,
     pub exe_path: String,
     pub threads_count: usize,
     /// Every thread belonging to this process, by tid.
@@ -334,7 +335,7 @@ pub struct Process {
 
 impl Process {
     pub fn new(pid: u64, ppid: u64, cr3: PhysAddr, priority: u8) -> Self {
-        let tty_arc = Arc::new(SpinLock::new(OpenFile {
+    let tty_arc = Arc::new(SpinLock::new(OpenFile {
             vnode: crate::fs::vfs::VNode::TtyDevice { vt: 0 },
             flags: 0,
             path: alloc::string::String::from("/dev/tty"),
@@ -375,6 +376,7 @@ impl Process {
             ctty_vt: 0,
             ctty_owner_sid: 0,
             cwd: String::from("/"),
+            ns: None,
             exe_path: String::new(),
             threads_count: 1,
             threads: BTreeMap::new(),
@@ -430,6 +432,7 @@ impl Process {
             ctty_vt: 0,
             ctty_owner_sid: 0,
             cwd: self.cwd.clone(),
+            ns: self.ns.clone(),
             exe_path: self.exe_path.clone(),
             threads_count: 1,
             threads: BTreeMap::new(),
@@ -1305,6 +1308,7 @@ pub fn register_exec_thread(cr3: PhysAddr, uid: u32, gid: u32, exe_path: &str) {
     p.sgid = gid;
     p.caps = if uid == 0 { crate::fs::perm::CAP_ALL } else { 0 };
     p.exe_path = alloc::string::String::from(exe_path);
+    p.ns = Some(crate::fs::mount::ensure_root_namespace());
     let process = Arc::new(SpinLock::new(p));
     PROCESS_TABLE
         .lock()
