@@ -975,6 +975,16 @@ if command -v gcc >/dev/null 2>&1; then
       cp -p "$ROOT/initrd/tmpfsw" "$STAGING/tmpfsw" 2>/dev/null || true
     fi
   fi
+  if [ -f "$ROOT/initrd/insmod.c" ] && command -v gcc >/dev/null 2>&1; then
+    if gcc -O2 -static -o "$ROOT/initrd/insmod" "$ROOT/initrd/insmod.c" 2>/dev/null; then
+      cp -p "$ROOT/initrd/insmod" "$STAGING/usr/bin/insmod" 2>/dev/null || true
+      cp -p "$ROOT/initrd/insmod" "$STAGING/bin/insmod" 2>/dev/null || true
+      cp -p "$ROOT/initrd/insmod" "$STAGING/insmod" 2>/dev/null || true
+      echo "[build-fs] insmod built from source (host gcc)"
+      cp -p "$ROOT/initrd/tmpfsw" "$STAGING/usr/bin/tmpfsw" 2>/dev/null || true
+      cp -p "$ROOT/initrd/tmpfsw" "$STAGING/tmpfsw" 2>/dev/null || true
+    fi
+  fi
   if [ -f "$ROOT/initrd/rawttytest.c" ] && command -v gcc >/dev/null 2>&1; then
     if gcc -O2 -static -o "$ROOT/initrd/rawttytest" "$ROOT/initrd/rawttytest.c" 2>/dev/null \
        || gcc -O2 -o "$ROOT/initrd/rawttytest" "$ROOT/initrd/rawttytest.c" 2>/dev/null; then
