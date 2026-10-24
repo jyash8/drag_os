@@ -311,115 +311,207 @@ impl FileNode for VfatDir {
             short_name[7] = digit;
         }
 
-        // Locate or append a free 32-byte slot.
-        let mut sec_lba: u64 = 0;
+
         let mut created_cluster: u32 = 0;
+        let mut sec_lba: u64 = 0;
         let mut slot_off: usize = 0;
-        let mut modified_sector: Option<(u64, [u8;512])> = None;
+        // Encode name as UTF-16 for long-file-name (LFN) entries.
+        // Only emit LFN slots when the name does not fit the legacy 8.3 form.
+        let mut utf16_units: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
+        for ch in name.chars() {
+            let mut tmp = [0u16; 2];
+            utf16_units.extend_from_slice(ch.encode_utf16(&mut tmp));
+        }
+        let name_chars = name.chars().count();
+        let ext_len = ext.bytes().count();
+        let need_lfn = !((name_chars <= 8 && ext_len <= 3) && true) ;
+        // Checksum of the 8.3 short alias used by LFN slots.
+        let lfn_checksum = {
+            let mut sum: u8 = 0;
+            for byte in short_name.iter().chain(short_ext.iter()) {
+                if sum & 0x01 != 0 { sum = (sum >> 1) + 0x80; } else { sum >>= 1; }
+                sum = sum.wrapping_add(*byte);
+            }
+            sum
+        };
+        let lfn_count = if need_lfn { ((utf16_units.len() + 12) / 13).max(1) } else { 0 };
+        let slot_count = lfn_count + 1usize;
+
+        // Build LFN slots (physical ordering; sequence 1..lfn_count).
+        let mut lfn_entries: alloc::vec::Vec<[u8; 32]> = alloc::vec::Vec::with_capacity(lfn_count);
+        for i in 0..lfn_count {
+            let mut e = [0u8; 32];
+            let seq = (i + 1) as u8;
+            e[0] = if i + 1 == lfn_count { seq | 0x40 } else { seq };
+            e[11] = 0x0f;
+            e[13] = lfn_checksum;
+            let base = i * 13usize;
+            let mut put_char = |slot_off: usize, u: u16| {
+                e[slot_off] = (u & 0xff) as u8;
+                e[slot_off + 1] = (u >> 8) as u8;
+            };
+            for k in 0usize..13 {
+                let unit = if base + k < utf16_units.len() {
+                    utf16_units[base + k]
+                } else if base + k == utf16_units.len() {
+                    0u16
+                } else {
+                    0xffffu16
+                };
+                if k < 5 { put_char(1 + k * 2, unit); }
+                else if k < 11 { put_char(14 + (k - 5) * 2, unit); }
+                else { put_char(28 + (k - 11) * 2, unit); }
+            }
+            lfn_entries.push(e);
+        }
+
+        // Build short 8.3 entry template.
+        let attr = if is_dir { 0x10u8 } else { 0x20u8 };
+        let mut short_entry = [0u8; 32];
+        short_entry[..8].copy_from_slice(&short_name);
+        short_entry[8..11].copy_from_slice(&short_ext);
+        short_entry[11] = attr;
+
+        // Directory sector buffers and where the first appended slot begins.
         let bps = self.fs.bytes_per_sector as usize;
-        if self.fs.fat_type != 32 && self.is_root {
-            let root_secs = (((self.fs.root_entries as usize) * 32) + (bps - 1)) / bps;
-            let base = self.fs.reserved_sectors as u64;
-            'outer: for sidx in 0..root_secs {
-                let mut sec = [0u8; 512];
-                if self.fs.reader.read_sector(base + sidx as u64, &mut sec).is_err() { continue; }
-                for off in (0..512).step_by(32) {
-                    if sec[off] == 0x00 || sec[off] == 0xE5 {
-                        sec_lba = base + sidx as u64;
-                        slot_off = off;
-                        modified_sector = Some((sec_lba, sec));
-                        break 'outer;
+        let mut first_cluster: Option<u32> = None;
+        let mut start_entry_idx: usize = 0;
+        let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let mut base_lba: u64 = 0;
+        let mut fixed_root = self.fs.fat_type != 32 && self.is_root;
+
+        if fixed_root {
+            let root_entries = self.fs.root_entries as usize;
+            let root_secs = (root_entries * 32 + bps - 1) / bps;
+            buf = alloc::vec![0u8; root_secs * bps];
+            base_lba = self.fs.reserved_sectors as u64;
+            for si in 0..root_secs {
+                let off = si * bps;
+                let _ = self.fs.reader.read_sector(base_lba + si as u64, &mut buf[off..off + bps]);
+            }
+            // Find a contiguous free run of slot_count entries in the fixed root.
+            let mut run_start: Option<usize> = None;
+            'findrun: for i in 0..(root_entries.saturating_sub(slot_count)) {
+                let mut ok = true;
+                for k in 0..slot_count {
+                    if buf[(i + k) * 32] != 0x00 && buf[(i + k) * 32] != 0xE5 {
+                        ok = false; break;
                     }
+                }
+                if ok { run_start = Some(i); break 'findrun; }
+            }
+            match run_start {
+                Some(idx) => start_entry_idx = idx,
+                None => {
+                    return Err(crate::arch::x86_64::syscalls::ENOMEM);
                 }
             }
         } else {
-            // FAT32 (or non-root) directory cluster chain
+            // Walk the cluster chain searching for a contiguous free run.
             let mut first = if self.first_cluster == 0 { self.fs.root_cluster } else { self.first_cluster };
             if first < 2 { first = self.fs.root_cluster; }
-            // Walk chain, allocate a new cluster if needed.
             let mut chain: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
             let mut cur = first;
             let mut visited=0usize;
-            loop {
-                if visited > 10000 { break; } visited+=1;
+            while visited < 10000 {
+                visited += 1;
                 if cur < 2 || self.fs.is_end(cur) { break; }
                 chain.push(cur);
-                let nxt = self.fs.fat_entry(cur);
-                if nxt==0 || nxt==cur || self.fs.is_end(nxt) { break; }
-                cur = nxt;
+                let n = self.fs.fat_entry(cur);
+                if n==0 || n==cur || self.fs.is_end(n) { break; }
+                cur=n;
             }
             if chain.is_empty() {
-                // allocate a new root-ish cluster for an empty root directory.
-                let c = self.fs.allocate_cluster().ok_or(ENOMEM)?;
-                chain.push(c);
-                first = c;
-                 
+                return Err(crate::arch::x86_64::syscalls::ENOMEM);
             }
-            // find free slot in any cluster
+            let cl = self.fs.cluster_size();
+            let entries_per_cluster = cl / 32;
+            let mut chosen: bool = false;
             for cluster in &chain {
-                let cl = self.fs.cluster_size();
                 let mut b = alloc::vec![0u8; cl];
                 if self.fs.read_cluster(*cluster, &mut b).is_err() { continue; }
-                #[allow(local_unsafe)]
-                for i in (0..cl).step_by(32) {
-                    if i + 32 > b.len() { break; }
-                    if b[i] == 0x00 || b[i] == 0xE5 {
-                        let sec_idx = i / bps;
-                        let off = i % bps;
-                        let mut sec = [0u8; 512];
-                        let _ = self.fs.reader.read_sector(self.fs.cluster_lba(*cluster) + sec_idx as u64, &mut sec);
-                        // copy any existing sector bytes
-                        let off_s = sec_idx*bps;
-                        for j in 0..512 { sec[j] = b[off_s+j]; }
-                        sec_lba = self.fs.cluster_lba(*cluster) + sec_idx as u64;
-                        slot_off = off;
-                        modified_sector = Some((sec_lba, sec));
-                        break;
+                for i in 0..entries_per_cluster.saturating_sub(slot_count) {
+                    let mut ok = true;
+                    for k in 0..slot_count {
+                        if b[(i+k)* 32] != 0 && b[(i+k)*32] != 0xE5 { ok=false; break; }
+                    }
+                    if ok {
+                        first_cluster = Some(*cluster);
+                        start_entry_idx = i;
+                        buf = b;
+                        chosen = true; break;
                     }
                 }
-                if modified_sector.is_some() { break; }
+                if chosen { break; }
             }
-            // if no free slot, append a cluster
-            if modified_sector.is_none() {
-                let newc = self.fs.allocate_cluster().ok_or(ENOMEM)?;
+            if !chosen {
+                // Append a new cluster (enough room for all appended entries).
                 let last = *chain.last().unwrap();
+                let newc = self.fs.allocate_cluster().ok_or(crate::arch::x86_64::syscalls::ENOMEM)?;
                 self.fs.set_fat_entry(last, newc);
-                // zero sector
-                let sec_lba0 = self.fs.cluster_lba(newc);
-                let mut sec=[0u8;512];
-                modified_sector = Some((sec_lba0, sec));
-                slot_off = 0;
-                sec_lba = sec_lba0;
+                let n2 = newc;
+                first_cluster = Some(n2);
+                start_entry_idx = 0;
+                buf = alloc::vec![0u8; self.fs.cluster_size()];
+                chosen = true;
             }
+            let cl = self.fs.cluster_size();
+            base_lba = self.fs.cluster_lba(first_cluster.unwrap());
+            // target cluster global mapping
+            let _ = cl;
         }
 
-        let (slot_sec, mut sector) = modified_sector.unwrap();
-        // populate entry
-        let off = slot_off;
-        // clear
-        for k in 0..32 { sector[off+k] = 0; }
-        sector[off..off+8].copy_from_slice(&short_name);
-        sector[off+8..off+11].copy_from_slice(&short_ext);
-        sector[off+11] = if is_dir { 0x10 } else { 0x20 };
-        // first cluster 0 (allocate on first write for file, empty dir root is a cluster? dirs should allocate)
+        // Allocate short-entry first-cluster for directories.
+        created_cluster = 0;
         if is_dir {
-            if let Some(c) = self.fs.allocate_cluster() {
-                created_cluster = c;
-                let hi = (c >> 16) as u16; let lo = c as u16;
-                sector[off+20] = (hi & 0xFF) as u8; sector[off+21] = (hi >> 8) as u8;
-                sector[off+26] = (lo & 0xFF) as u8; sector[off+27] = (lo >> 8) as u8;
-                // zero cluster
-                let cs = self.fs.cluster_size();
-                let mut z = alloc::vec![0u8; cs];
-                let _ = self.fs.write_cluster(c, &z);
-            }
+            let c = self.fs.allocate_cluster().ok_or(crate::arch::x86_64::syscalls::ENOMEM)?;
+            created_cluster = c;
+            let hi = (c >> 16) as u16;
+            let lo = c as u16;
+            short_entry[20] = (hi & 0xff) as u8; short_entry[21] = (hi >> 8) as u8;
+            short_entry[26] = (lo & 0xff) as u8; short_entry[27] = (lo >> 8) as u8;
+            let cs = self.fs.cluster_size();
+            let z = alloc::vec![0u8; cs];
+            let _ = self.fs.write_cluster(c, &z);
         }
-        self.fs.reader.write_sector(slot_sec, &sector).map_err(|_|ENOSYS)?;
-        // locate created file name via newly allocated? For dir first cluster from entry
+
+        // Append LFN + short entry bytes.
+        let mut short_entry_erased = short_entry;
+        for k in 0..32 {
+            let slot = start_entry_idx * 32 + k;
+            buf[slot] = 0;
+        }
+        for (i, e) in lfn_entries.iter().enumerate() {
+            let off = (start_entry_idx + i) * 32;
+            for k in 0..32 { buf[off + k] = e[k]; }
+        }
+        let off_short = (start_entry_idx + lfn_count) * 32;
+        for k in 0..32 { buf[off_short + k] = short_entry_erased[k]; }
+
+        if fixed_root {
+            // Write all root sectors back.
+            for si in 0..(buf.len() / bps) {
+                let _ = self.fs.reader.write_sector(base_lba + si as u64, &buf[si * bps..(si + 1) * bps]);
+            }
+            let final_byte_off = off_short;
+            sec_lba = base_lba + (final_byte_off / bps) as u64;
+            slot_off = final_byte_off % bps;
+        } else {
+            let cl = self.fs.cluster_size();
+            // write cluster
+            let _ = self.fs.write_cluster(first_cluster.unwrap(), &buf);
+            let final_byte_off = off_short;
+            let sec_in_cluster = final_byte_off / bps;
+            sec_lba = self.fs.cluster_lba(first_cluster.unwrap()) + sec_in_cluster as u64;
+            slot_off = final_byte_off % bps;
+        }
+        let entry_cluster = created_cluster;
+        // Preserve old final short writes
+        let _ = (sec_lba, slot_off);
         let entry_cluster = created_cluster;
         let ent_size = 0usize;
         let parent = if self.is_root { 0 } else { self.first_cluster };
-        Ok(Arc::new(VfatFile{fs:self.fs.clone(), first_cluster: alloc::sync::Arc::new(core::sync::atomic::AtomicU32::new(entry_cluster)), parent_cluster:parent, size:alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(ent_size)), entry_sector:slot_sec, entry_offset:slot_off}))
+        Ok(Arc::new(VfatFile{fs:self.fs.clone(), first_cluster: alloc::sync::Arc::new(core::sync::atomic::AtomicU32::new(entry_cluster)), parent_cluster:parent, size:alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(ent_size)), entry_sector:sec_lba, entry_offset:slot_off}))
     }
     fn truncate(&self,_:usize)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
     fn stat(&self)->crate::arch::x86_64::syscalls::Stat{crate::arch::x86_64::syscalls::Stat::default()}
