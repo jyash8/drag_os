@@ -816,9 +816,11 @@ impl VfatFs {
 impl VfatFs {
     pub fn rename_wrap(&self, file: &VfatFile, new_name: &str) -> Result<(), u64> {
         use crate::arch::x86_64::syscalls::{EEXIST, ENOENT, ENOSYS, EINVAL};
-        if new_name.is_empty() || new_name.contains('/') || new_name=="." || new_name==".." { return Err(EINVAL); }
+        // sys_rename passes the full destination path; accept the leaf component.
+        let leaf = new_name.trim_end_matches('/').rsplit('/').next().unwrap_or(new_name);
+        if leaf.is_empty() || leaf=="." || leaf==".." { return Err(EINVAL); }
         // 8.3 target
-        let (stem, ext) = if let Some(pos)=new_name.rfind('.') { (&new_name[..pos], &new_name[pos+1..]) } else { (new_name, "") };
+        let (stem, ext) = if let Some(pos)=leaf.rfind('.') { (&leaf[..pos], &leaf[pos+1..]) } else { (leaf, "") };
         let mut short_name=[b' ';8];
         for (i,b) in stem.bytes().take(8).enumerate() { short_name[i]=if b.is_ascii_lowercase(){b-32}else{b}; }
         let mut short_ext=[b' ';3];
