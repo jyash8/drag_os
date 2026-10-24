@@ -190,6 +190,13 @@ fn bootstrap_env() {
         std::env::set_var("MESA_SHADER_CACHE_MAX_SIZE", "32M");
     }
     let _ = std::fs::create_dir_all("/tmp");
+    // /tmp must be world-writable (sticky) so uid-1000 daemons can allocate
+    // SHM files (foot, mesa shader cache, ...). create_dir_all leaves it as
+    // 0755 root-owned by default, which blocks them.
+    unsafe {
+        let path = std::ffi::CString::new("/tmp").unwrap();
+        libc::chmod(path.as_ptr(), 0o1777);
+    }
     // Mount the ESP so virgl auto-detect works (best effort, like init.sh).
     let _ = std::fs::create_dir_all("/efi");
     for dev in ["/dev/vda1", "/dev/sda1"] {

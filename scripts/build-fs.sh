@@ -28,6 +28,7 @@ mkdir -p "$STAGING"/dev/pts
 mkdir -p "$STAGING"/proc
 mkdir -p "$STAGING"/sys
 mkdir -p "$STAGING"/tmp
+chmod 1777 "$STAGING"/tmp
 mkdir -p "$STAGING"/var
 mkdir -p "$STAGING"/root
 
