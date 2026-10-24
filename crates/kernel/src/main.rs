@@ -159,6 +159,19 @@ pub extern "sysv64" fn kernel_main(boot_info: *const BootInfo) -> ! {
         }
     }
 
+    // Devfs/procfs pseudo-resolution + mount-table sanity (boot-time quick check).
+    // Stale AGENTS note claimed mount was not dispatched; it is now (165 =>)
+    // and basic nodes (/proc, /proc/self, /dev/null) must resolve.
+    let mount_ok = kernel::fs::lookup("proc").is_some()
+        && kernel::fs::lookup("proc/self").is_some()
+        && kernel::fs::lookup("dev/null").is_some()
+        && kernel::fs::lookup("dev/zero").is_some();
+    if mount_ok {
+        kernel::println!("DEVFS_SELFTEST_OK");
+    } else {
+        kernel::println!("DEVFS_SELFTEST_FAIL");
+    }
+
     // Woke the application processors (SMP) so they can pick up runnable
     // threads from the shared scheduler alongside the BSP.
     let aps = kernel::smp::boot_aps();

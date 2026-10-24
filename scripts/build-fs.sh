@@ -697,7 +697,7 @@ path = "/usr/bin/mywima"
 uid = 1000
 gid = 1000
 delay_ms = 0
-restart = "never"
+restart = "on_failure"
 restart_delay_ms = 2000
 [daemon.env]
 LIBGL_DRIVERS_PATH = "/usr/lib/dri"

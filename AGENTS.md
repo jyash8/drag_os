@@ -62,12 +62,10 @@ itself) in `userspace/draginit/src/main.rs: exec_shell`.
 for shell prompt" — including tests that pass in isolation. That uniformity is
 the tell: a real kernel bug fails one test, a sink bug fails all of them.
 
-**Also note:** `mount(2)` is not dispatched (no `165 =>` arm), so
-`mount -t vfat /dev/vda1 /efi` in `init.sh` always fails with ENOSYS and `/efi`
-is never populated. The harness's `esp/efi/boot/test_mode` flag is therefore
-unreachable from the guest; only `/test_mode` in the root fs is visible.
-(`/proc` only *appears* to mount — `/proc/self/fd/N` readlink is faked inside
-`sys_readlinkat`.)
+**Also note:** `mount(2)` is now dispatched (`165 => sys_mount`) and the pseudo mount table is consulted
+by the lookup path. Real FAT support is best-effort (`vfat` shim returns an empty directory), but the
+mount call itself no longer fails with ENOSYS and `/efi` is reached if a vfat child actually exists.
+(`/proc` only *appears* to mount — `/proc/self/fd/N` readlink is faked inside `sys_readlinkat`.)
 
 **Not every user-visible failure is a test failure.** The same sink problem
 silently disabled `ssh_probe`/`sshd_probe` for as long as it stood, because
