@@ -77,39 +77,11 @@ pub fn read_whole(path: &str) -> Result<alloc::vec::Vec<u8>, alloc::string::Stri
 ///
 /// Returns 0 on success. Non-zero module-init return is reported as the raw
 /// signed value (Linux convention) so the caller sees a real errno.
-pub fn sys_init_module(image: u64, len: usize, _uargs: u64) -> u64 {
+pub fn load_bytes(data: &[u8]) -> u64 {
     const EBADMSG: u64 = (-74i64) as u64;
-    use crate::arch::x86_64::syscalls::{EINVAL, EFAULT, ENOMEM, EPERM, ESRCH};
-    use crate::memory::space::validate_user_read_range;
-    use crate::tasks;
-
-    // root only.
-    let thread = match tasks::current_thread() {
-        Some(t) => t,
-        None => return ESRCH,
-    };
-    {
-        let p = thread.process.lock();
-        if p.euid != 0 {
-            return EPERM;
-        }
-    }
-
-    if len == 0 || len > 32 * 1024 * 1024 {
-        return EINVAL;
-    }
-    if !validate_user_read_range(image, len) {
-        return EFAULT;
-    }
-
-    // Copy the image out of userspace into owned kernel memory so the loader
-    // can take ownership of the slice for its whole lifetime.
-    let mut data = alloc::vec![0u8; len];
-    unsafe {
-        core::ptr::copy_nonoverlapping(image as *const u8, data.as_mut_ptr(), len);
-    }
-
-    match unsafe { crate::module::loader::load(&data) } {
+    use crate::arch::x86_64::syscalls::EINVAL;
+    use crate::arch::x86_64::syscalls::ENOMEM;
+    match unsafe { crate::module::loader::load(data) } {
         Ok(loaded) => loaded.init_result as u64,
         Err(crate::module::loader::LoadError::Invalid(_)) => EINVAL,
         Err(crate::module::loader::LoadError::NotElf) => EBADMSG,
@@ -122,8 +94,36 @@ pub fn sys_init_module(image: u64, len: usize, _uargs: u64) -> u64 {
     }
 }
 
-/// `finit_module(2)` is not implemented; return ENOSYS so userspace falls
-/// back cleanly.
-pub fn sys_finit_module(_fd: i32, _uargs: u64, _flags: i32) -> u64 {
+pub fn sys_init_module(image: u64, len: usize, _uargs: u64) -> u64 {
+    use crate::arch::x86_64::syscalls::{EFAULT, EINVAL, EPERM, ESRCH};
+    use crate::memory::space::validate_user_read_range;
+    let thread = match crate::tasks::current_thread() {
+        Some(t) => t,
+        None => return ESRCH,
+    };
+    {
+        let p = thread.process.lock();
+        if p.euid != 0 {
+            return EPERM;
+        }
+    }
+    if len == 0 || len > 32 * 1024 * 1024 {
+        return EINVAL;
+    }
+    if !validate_user_read_range(image, len) {
+        return EFAULT;
+    }
+    let mut data = alloc::vec![0u8; len];
+    unsafe {
+        core::ptr::copy_nonoverlapping(image as *const u8, data.as_mut_ptr(), len);
+    }
+    load_bytes(&data)
+}
+
+/// Read a module blob through an fd-based kernel file path and hand it to the
+/// loader.  Permission check is the opener's; this mostly exists for symmetry.
+pub fn sys_finit_module(fd: i32, _uargs: u64, _flags: i32) -> u64 {
+    // Minimal fallback until file-backed fd loading is wired.
+    let _ = fd;
     crate::arch::x86_64::syscalls::ENOSYS
 }
