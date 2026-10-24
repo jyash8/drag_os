@@ -290,6 +290,27 @@ impl FileNode for VfatDir {
         let mut short_ext = [b' '; 3];
         for (i,b) in ext.bytes().take(3).enumerate() { short_ext[i] = if b.is_ascii_lowercase() { b - 32 } else { b }; }
 
+        // LFN/alias collision guard: if the bare short name exists, append a
+        // two-character "~N" suffix to the stem.
+        let mut collisions_seen = 0u8;
+        loop {
+            let mut cand_buf = alloc::string::String::new();
+            for &b in &short_name { if b != b' ' { cand_buf.push(b as char); } }
+            if !short_ext.iter().all(|&x| x==b' ') {
+                cand_buf.push('.');
+                for &b in &short_ext { if b != b' ' { cand_buf.push(b as char); } }
+            }
+            let mut out = alloc::vec::Vec::new();
+            self.fs.list_entries(self.first_cluster, &mut out);
+            let exists = out.iter().any(|(n,_,_,_)| n.to_uppercase()==cand_buf.to_uppercase());
+            if !exists { break; }
+            collisions_seen += 1;
+            if collisions_seen > 8 { break; }
+            let digit = b'0' + collisions_seen;
+            short_name[6] = b'~';
+            short_name[7] = digit;
+        }
+
         // Locate or append a free 32-byte slot.
         let mut sec_lba: u64 = 0;
         let mut created_cluster: u32 = 0;
