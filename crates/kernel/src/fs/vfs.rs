@@ -70,6 +70,11 @@ pub trait FileNode: Send + Sync {
     fn read_link(&self) -> Result<alloc::string::String, u64> { Err(crate::arch::x86_64::syscalls::EINVAL) }
     /// Stable identity for the DSO cache. Default 0 = not cacheable.
     fn cache_id(&self) -> u64 { 0 }
+
+    /// Parent-directory handle exposed by VFAT for cross-directory moves.
+    fn vfat_dir_cluster(&self) -> Option<u32> { None }
+    fn vfat_fs_ptr(&self) -> u64 { 0 }
+    fn rename_with_target_parent(&self, _new_name: &str, _target_parent_cluster: Option<u32>) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
 }
 
 #[repr(C, packed)]

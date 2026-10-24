@@ -3882,9 +3882,25 @@ pub(super) fn sys_rename(oldpath_ptr: u64, newpath_ptr: u64) -> u64 {
         }
     }
     match &old_vn {
-        VNode::FsNode { node, .. } => match node.rename(&newpath) {
-            Ok(_) => 0,
-            Err(e) => e,
+        VNode::FsNode { node, .. } => {
+            if node.vfat_fs_ptr() != 0 {
+                let target_parent = match &new_parent {
+                    VNode::FsNode { node, .. } => node.vfat_dir_cluster(),
+                    _ => None,
+                };
+                let target_fs = match &new_parent {
+                    VNode::FsNode { node, .. } => node.vfat_fs_ptr(),
+                    _ => 0,
+                };
+                let tfs = target_fs;
+                const EXDEV: u64 = (-18i64) as u64; if tfs != 0 && tfs != node.vfat_fs_ptr() { return EXDEV; }
+                match node.rename_with_target_parent(&newpath,target_parent) {
+                    Ok(_) => 0,
+                    Err(e) => e,
+                }
+            } else {
+                match node.rename(&newpath) { Ok(_) => 0, Err(e)=>e }
+            }
         },
         _ => EPERM,
     }

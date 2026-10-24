@@ -77,7 +77,234 @@ impl VfatFs {
         (self.sectors_per_cluster as usize) * (self.bytes_per_sector as usize)
     }
     pub fn sync_all(&self) -> Result<(),()> { Ok(()) }
-pub fn fat_type(&self) -> u32 { self.fat_type }
+
+
+    pub fn move_vfat_entry(&self, file: &VfatFile, new_name: &str, target_parent_cluster: Option<u32>) -> Result<(), u64> {
+        let leaf = new_name.trim_end_matches('/').rsplit('/').next().unwrap_or(new_name);
+        if leaf.is_empty() || leaf == "." || leaf == ".." { return Err(crate::arch::x86_64::syscalls::EINVAL); }
+        let src_parent = file.parent_cluster;
+        let dst_parent = target_parent_cluster.unwrap_or(src_parent);
+        let mut old_data = match self.read_dir_bytes(src_parent) {
+            Ok(d) => d, Err(e) => return Err(e),
+        };
+        // Locate the source short entry by its first cluster.
+        let mut old_run: Option<usize> = None;
+        let mut old_lfn: usize = 0;
+        let mut created_cluster = 0u32;
+        let mut file_size_usize = file.size.load(core::sync::atomic::Ordering::SeqCst);
+        let mut is_dir = false;
+        let mut attr = 0x20u8;
+        let clu = file.first_cluster.load(core::sync::atomic::Ordering::SeqCst);
+        let nent = old_data.len() / 32;
+        for i in 0..nent {
+            if i + 1 > nent { break; }
+            let p = i * 32;
+            let e = &old_data[p..p+32];
+            if e[0] == 0 || e[0] == 0xE5 { continue; }
+            if e[11] == 0x0F { continue; }
+            let hi = u16::from_le_bytes([e[20], e[21]]) as u32;
+            let lo = u16::from_le_bytes([e[26], e[27]]) as u32;
+            if (hi << 16) | lo == clu {
+                created_cluster = clu;
+                attr = e[11];
+                is_dir = (attr & 0x10) != 0;
+                file_size_usize = u32::from_le_bytes([e[28],e[29],e[30],e[31]]) as usize;
+                old_run = Some(i);
+                // count leading LFN
+                let mut j = i;
+                while j > 0 {
+                    let prev = &old_data[(j-1)*32..j*32];
+                    if prev[11] == 0x0F && prev[0] != 0 && prev[0] != 0xE5 { j -= 1; } else { break; }
+                }
+                old_lfn = i - j;
+                // store actual slot start in a second run variable below by rewriting
+                break;
+            }
+        }
+        let run_start0 = match old_run {
+            Some(i) => i.saturating_sub(old_lfn),
+            None => return Err(crate::arch::x86_64::syscalls::ENOENT),
+        };
+        let run_len = old_lfn + 1;
+
+        // Build a new alias for new_name.
+        let (stem, ext) = if let Some(pos) = leaf.rfind('.') { (&leaf[..pos], &leaf[pos+1..]) } else { (leaf, "") };
+        let mut short_name = [b' '; 8];
+        for (i,b) in stem.bytes().take(8).enumerate() { short_name[i] = if b.is_ascii_lowercase() { b-32 } else { b }; }
+        let mut short_ext = [b' '; 3];
+        for (i,b) in ext.bytes().take(3).enumerate() { short_ext[i] = if b.is_ascii_lowercase() { b-32 } else { b }; }
+        // Collision: try bare, then ~1..~9.
+        loop {
+            let mut cand_buf = alloc::string::String::new();
+            for &b in &short_name { if b != b' ' { cand_buf.push(b as char); } }
+            if !short_ext.iter().all(|&x|x==b' ') { cand_buf.push('.'); for &b in &short_ext { if b!=b' ' { cand_buf.push(b as char);} } }
+            let mut existing = alloc::vec::Vec::new();
+            self.list_entries(dst_parent, &mut existing);
+            if !existing.iter().any(|(n,_,_,_)| n.to_uppercase()==cand_buf.to_uppercase()) { break; }
+            short_name[6]=b'~';
+            let digit = b'1'; short_name[7]=digit;
+            short_name[5]=b' ';
+        }
+        // Build LFN entries if needed.
+        let mut utf16: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
+        for ch in new_name.chars() { let mut buf=[0u16;2]; utf16.extend_from_slice(ch.encode_utf16(&mut buf)); }
+        let need_lfn = !((leaf.chars().count() <= 8 && ext.bytes().count() <= 3));
+        let lfn_count = if need_lfn { ((utf16.len() + 12) / 13).max(1) } else { 0 };
+        let mut entries: alloc::vec::Vec<[u8;32]> = alloc::vec::Vec::new();
+        // checksum
+        let mut sum: u8 = 0;
+        for byte in short_name.iter().chain(short_ext.iter()) {
+            if sum & 0x01 != 0 { sum = (sum >> 1) + 0x80; } else { sum >>= 1; }
+            sum = sum.wrapping_add(*byte);
+        }
+        let checksum = sum;
+        for i in 0..lfn_count {
+            let mut e=[0u8;32];
+            let base=i*13;
+            let mut put = |pos: usize,u:u16| { e[pos]=(u&0xff) as u8; e[pos+1]=(u>>8) as u8; };
+            for k in 0..13 {
+                let u=if base+k < utf16.len() { utf16[base+k] } else if base+k==utf16.len() { 0u16 } else { 0xffffu16 };
+                if k<5 { put(1+k*2,u); }
+                else if k<11 { put(14+(k-5)*2,u); }
+                else { put(28+(k-11)*2,u); }
+            }
+            e[0] = if i + 1 == lfn_count { (lfn_count as u8) | 0x40 } else { (lfn_count - i) as u8 };
+            e[11]=0x0f; e[12]=0; e[13]=checksum; e[26]=0; e[27]=0;
+            entries.push(e);
+        }
+        let mut short=[0u8;32];
+        short[..8].copy_from_slice(&short_name);
+        short[8..11].copy_from_slice(&short_ext);
+        short[11]=attr;
+        let hi=(created_cluster >>16) as u16; let lo=created_cluster as u16;
+        short[20]=(hi&0xff) as u8; short[21]=(hi>>8) as u8;
+        short[26]=(lo&0xff) as u8; short[27]=(lo>>8) as u8;
+        let sz=file_size_usize as u32;
+        let b=sz.to_le_bytes();
+        short[28]=b[0];short[29]=b[1];short[30]=b[2];short[31]=b[3];
+        entries.push(short);
+        let need = entries.len();
+
+        // Read target directory.
+        let mut target_data = match self.read_dir_bytes(dst_parent) {
+            Ok(d)=>d, Err(e)=>return Err(e),
+        };
+        // Find contiguous free run.
+        let slots_per = target_data.len()/32;
+        let mut run_start = None;
+        'outer: for i in 0..slots_per.saturating_sub(need) {
+            let mut ok=true;
+            for k in 0..need {
+                let idx=(i+k)*32;
+                if target_data[idx]!=0 && target_data[idx]!=0xE5 { ok=false; break; }
+            }
+            if ok { run_start=Some(i); break 'outer; }
+        }
+        let (chosen_cluster, target_start, append_bytes) = if dst_parent != 0 || self.fat_type==32 {
+            if let Some(r)=run_start {
+                (None,r,false)
+            } else {
+                // append
+                let last = match self.last_dir_cluster(dst_parent) { Some(c)=>c, None=>return Err(crate::arch::x86_64::syscalls::ENOMEM) };
+                let newc = self.allocate_cluster().ok_or(crate::arch::x86_64::syscalls::ENOMEM)?;
+                self.set_fat_entry(last,newc);
+                // zero cluster
+                let cs=self.cluster_size();
+                let mut z=alloc::vec![0u8;cs];
+                let _=self.write_cluster(newc,&z);
+                (Some(newc),0,true)
+            }
+        } else {
+            // fixed root
+            if run_start.is_none() { return Err(crate::arch::x86_64::syscalls::ENOMEM); }
+            (None, run_start.unwrap(), false)
+        };
+        // If appended, write one cluster buffer, otherwise write full target directory bytes.
+        if let Some(newc)=chosen_cluster {
+            let mut cluster_buf=alloc::vec![0u8; self.cluster_size()];
+            for (i,e) in entries.iter().enumerate() { for k in 0..32 { cluster_buf[i*32+k]=e[k]; } }
+            let _=self.write_cluster(newc,&cluster_buf);
+        } else if append_bytes == false {
+            let start = (target_start * 32) as usize;
+            for (i,e) in entries.iter().enumerate() { for k in 0..32 { target_data[start+i*32+k]=e[k]; } }
+            // flush target directory (same parent)
+            self.write_dir_bytes(dst_parent,&target_data)?;
+        }
+        // mark old entries deleted
+        for k in 0..(old_lfn+1) {
+            let idx=(run_start0+k)*32;
+            if idx+32 <= old_data.len() { old_data[idx] = 0xE5; }
+        }
+        self.write_dir_bytes(src_parent,&old_data)?;
+        // update file metadata
+        // update entry_sector for non-append? irrelevant but try; leave.
+        Ok(())
+    }
+
+    fn read_dir_bytes(&self, parent_cluster: u32) -> Result<alloc::vec::Vec<u8>,u64> {
+        if self.fat_type != 32 && parent_cluster == 0 {
+            let root_secs = (((self.root_entries as usize) * 32) + (self.bytes_per_sector as usize - 1)) / (self.bytes_per_sector as usize);
+            let base = self.reserved_sectors as u64;
+            let mut buf = alloc::vec![0u8; root_secs * self.bytes_per_sector as usize];
+            for i in 0..root_secs {
+                let off = i * self.bytes_per_sector as usize;
+                let _ = self.reader.read_sector(base + i as u64, &mut buf[off..off + self.bytes_per_sector as usize]);
+            }
+            Ok(buf)
+        } else {
+            let first = if parent_cluster == 0 { self.root_cluster } else { parent_cluster };
+            if first < 2 { return Err(crate::arch::x86_64::syscalls::ENOENT); }
+            let mut out = alloc::vec::Vec::new();
+            let mut cur = first;
+            let mut visited=0usize;
+            while visited < 10000 {
+                visited +=1;
+                if cur <2 || self.is_end(cur) { break; }
+                let cl = self.cluster_size();
+                let mut b=alloc::vec![0u8;cl];
+                if self.read_cluster(cur,&mut b).is_err() { return Err(crate::arch::x86_64::syscalls::EIO); }
+                out.extend_from_slice(&b);
+                let nxt = self.fat_entry(cur);
+                if nxt==0 || nxt==cur || self.is_end(nxt) { break; }
+                cur=nxt;
+            }
+            Ok(out)
+        }
+    }
+
+    fn write_dir_bytes(&self, parent_cluster: u32, data: &[u8]) -> Result<(),u64> {
+        if self.fat_type != 32 && parent_cluster == 0 {
+            let root_secs = (((self.root_entries as usize) * 32) + (self.bytes_per_sector as usize - 1)) / (self.bytes_per_sector as usize);
+            let base = self.reserved_sectors as u64;
+            for i in 0..root_secs {
+                let off=i*self.bytes_per_sector as usize;
+                let _ = self.reader.write_sector(base+i as u64,&data[off..off+self.bytes_per_sector as usize]);
+            }
+            Ok(())
+        } else {
+            let first = if parent_cluster == 0 { self.root_cluster } else { parent_cluster };
+            let cl = self.cluster_size();
+            if data.len()!=cl { return Err(crate::arch::x86_64::syscalls::EINVAL); }
+            self.write_cluster(first,&data);
+            Ok(())
+        }
+    }
+
+    fn last_dir_cluster(&self, parent_cluster: u32) -> Option<u32> {
+        let first = if parent_cluster==0 { if self.fat_type==32 { self.root_cluster } else { return None; } } else { parent_cluster };
+        let mut cur=first; let mut visited=0; let mut last=Option::None;
+        while cur >= 2 && cur < 0x0FFFFFFF && visited <10000 {
+            visited+=1;
+            last=Some(cur);
+            if self.is_end(self.fat_entry(cur)) { break; }
+            let n=self.fat_entry(cur);
+            if n==0||n==cur { break; }
+            cur=n;
+        }
+        last
+    }
+
+    pub fn fat_type(&self) -> u32 { self.fat_type }
     pub fn root_cluster(&self) -> u32 { self.root_cluster }
     pub fn is_end(&self, c: u32) -> bool {
         match self.fat_type {
@@ -598,6 +825,8 @@ impl FileNode for VfatDir {
     fn chown(&self,_uid:u32,_gid:u32)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
     fn read_link(&self)->Result<String,u64>{Err(crate::arch::x86_64::syscalls::EINVAL)}
     fn cache_id(&self)->u64{0}
+    fn vfat_dir_cluster(&self)->Option<u32>{Some(self.first_cluster)}
+    fn vfat_fs_ptr(&self)->u64{Arc::as_ptr(&self.fs) as u64}
 }
 
 impl FileNode for VfatFile {
@@ -645,6 +874,15 @@ impl FileNode for VfatFile {
     fn list_dir(&self) -> Result<Vec<(String, bool)>, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn unlink(&self, _: &str) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn rename(&self, new_name: &str) -> Result<(), u64> { self.fs.rename_wrap(self, new_name) }
+    fn vfat_fs_ptr(&self) -> u64 { Arc::as_ptr(&self.fs) as u64 }
+    fn vfat_dir_cluster(&self) -> Option<u32> { Some(self.parent_cluster) }
+    fn rename_with_target_parent(&self, new_name: &str, target_parent_cluster: Option<u32>) -> Result<(), u64> {
+        if target_parent_cluster.is_none() || target_parent_cluster == Some(self.parent_cluster) {
+            self.fs.rename_wrap(self,new_name)
+        } else {
+            self.fs.move_vfat_entry(self,new_name,target_parent_cluster)
+        }
+    }
     fn link(&self, _n: &str, _t: Arc<dyn FileNode>) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn symlink(&self, _n: &str, _t: &str) -> Result<Arc<dyn FileNode>, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
     fn chmod(&self, _m: u32) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
@@ -1005,3 +1243,4 @@ impl VfatFs {
         Ok(())
     }
 }
+
