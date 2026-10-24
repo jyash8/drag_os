@@ -172,33 +172,67 @@ impl VfatFs {
     }
 }
 
+
+fn extract_lfn(_slot: &[u8], _out: &mut [char], _base: usize) {
+    // LFN decoding deferred.
+}
+
 fn parse_dir(out: &mut Vec<(String, bool, u32, usize)>, data: &[u8], fs: &VfatFs) {
+    let mut lfn_storage = ['\0'; 255];
+    let mut lfn_count = 0;
+    let mut first_cluster_active = false;
+    let mut first_cluster = 0u32;
     for i in (0..data.len()).step_by(32) {
         if i + 32 > data.len() { break; }
-        let e = &data[i..i + 32];
+        let e = &data[i..i+32];
         if e[0] == 0 { break; }
-        if e[0] == 0xE5 { continue; }
-        if e[11] & 0x08 != 0 { continue; } // volume label
-        if e[11] == 0x0F { continue; }     // LFN
-        let mut name = String::new();
-        for &b in &e[0..8] { if b == b' ' { break; } name.push(b as char); }
-        if e[8..11].iter().any(|&x| x != b' ') {
-            name.push('.');
-            for &b in &e[8..11] { if b == b' ' { break; } name.push(b as char); }
+        if e[0] == 0xE5 {
+            // reset lfn on delete marker? keep
+            continue;
         }
-        if name.is_empty() || name == "." || name == ".." { continue; }
-        let is_dir = (e[11] & 0x10) != 0;
+        if e[11] == 0x0F {
+            // LFN slot
+            let ord = (e[0] & 0x1F) as usize;
+            if ord == 0 { continue; }
+            let base = (ord - 1) * 13;
+            if base + 13 <= 255 {
+                extract_lfn(e, &mut lfn_storage, base);
+                lfn_count = lfn_count.max(ord * 13);
+            }
+            continue;
+        }
+        // regular entry
+        if e[11] & 0x08 != 0 { // volume label
+            // reset
+            lfn_storage = ['\0'; 255];
+            lfn_count = 0;
+            continue;
+        }
+        let raw = &e[0..8];
+        let ext = &e[8..11];
+        let mut name = String::new();
+        for &b in raw { if b == b' ' { break; } name.push(b as char); }
+        // LFN override
+        if ext.iter().any(|&x| x != b' ') && name.chars().last().map(|c| c != '.').unwrap_or(true) {
+            // append ext if not LFN
+            if !name.is_empty() && !name.contains('.') {
+                name.push('.');
+                for &b in ext { if b == b' ' { break; } name.push(b as char); }
+            }
+        }
+        if name.is_empty() || name == "." || name == ".." { 
+            lfn_storage = ['\0';255]; lfn_count=0; continue;
+        }
+        let is_dir = e[11] & 0x10 != 0;
         let hi = u16::from_le_bytes([e[20], e[21]]) as u32;
         let lo = u16::from_le_bytes([e[26], e[27]]) as u32;
         let cluster = (hi << 16) | lo;
         let size = u32::from_le_bytes([e[28], e[29], e[30], e[31]]) as usize;
-        let _ = fs;
         out.push((name, is_dir, cluster, size));
+        let _ = fs;
     }
 }
 
-use alloc::alloc::GlobalAlloc;
-use alloc::alloc::alloc;
 
 #[derive(Clone)]
 pub struct VfatDir {
@@ -207,56 +241,6 @@ pub struct VfatDir {
     pub is_root: bool,
     pub cached: alloc::sync::Arc<core::sync::atomic::AtomicUsize>,
 }
-
-impl FileNode for VfatDir {
-    fn read_at(&self, _: usize, _: &mut [u8]) -> Result<usize, u64> {
-        Err(crate::arch::x86_64::syscalls::EISDIR)
-    }
-    fn write_at(&self, _: usize, _: &[u8]) -> Result<usize, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn lookup(&self, name: &str) -> Result<Arc<dyn FileNode>, u64> {
-        let mut out = Vec::new();
-        let first = if self.is_root && self.fs.fat_type() == 32 {
-            self.fs.root_cluster()
-        } else {
-            self.first_cluster
-        };
-        self.fs.list_entries(first, &mut out);
-        for (n, is_dir, cluster, size) in out {
-            if n.to_lowercase() == name.to_lowercase() {
-                if is_dir {
-                    return Ok(Arc::new(VfatDir { fs: self.fs.clone(), first_cluster: cluster, is_root: false, cached: alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0)) }));
-                } else {
-                    return Ok(Arc::new(VfatFile { fs: self.fs.clone(), first_cluster: cluster, size }));
-                }
-            }
-        }
-        Err(crate::arch::x86_64::syscalls::ENOENT)
-    }
-    fn create(&self, _n: &str, _i: bool, _m: u32, _u: u32, _g: u32) -> Result<Arc<dyn FileNode>, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn truncate(&self, _: usize) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn stat(&self) -> crate::arch::x86_64::syscalls::Stat { crate::arch::x86_64::syscalls::Stat::default() }
-    fn is_dir(&self) -> bool { true }
-    fn size(&self) -> usize { 0 }
-    fn list_dir(&self) -> Result<Vec<(String, bool)>, u64> {
-        let mut out = Vec::new();
-        let first = if self.is_root && self.fs.fat_type() == 32 {
-            self.fs.root_cluster()
-        } else {
-            self.first_cluster
-        };
-        self.fs.list_entries(first, &mut out);
-        Ok(out.into_iter().map(|e| (e.0, e.1)).collect())
-    }
-    fn unlink(&self, _: &str) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn rename(&self, _: &str) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn link(&self, _n: &str, _t: Arc<dyn FileNode>) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn symlink(&self, _n: &str, _t: &str) -> Result<Arc<dyn FileNode>, u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn chmod(&self, _m: u32) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn chown(&self, _uid: u32, _gid: u32) -> Result<(), u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
-    fn read_link(&self) -> Result<String, u64> { Err(crate::arch::x86_64::syscalls::EINVAL) }
-    fn cache_id(&self) -> u64 { 0 }
-}
-
 #[derive(Clone)]
 pub struct VfatFile {
     pub fs: Arc<VfatFs>,
@@ -264,10 +248,48 @@ pub struct VfatFile {
     pub size: usize,
 }
 
+impl FileNode for VfatDir {
+    fn read_at(&self, _: usize, _: &mut [u8]) -> Result<usize,u64> { Err(crate::arch::x86_64::syscalls::EISDIR) }
+    fn write_at(&self, _: usize, _: &[u8]) -> Result<usize,u64> { Err(crate::arch::x86_64::syscalls::ENOSYS) }
+    fn lookup(&self, name: &str) -> Result<Arc<dyn FileNode>, u64> {
+        let mut out=Vec::new();
+        self.fs.list_entries(self.first_cluster,&mut out);
+        for (n,is_dir,cluster,size) in out {
+            if n.to_lowercase()==name.to_lowercase() {
+                if is_dir {
+                    return Ok(Arc::new(VfatDir{fs:self.fs.clone(),first_cluster:cluster,is_root:false,cached:alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0))}));
+                } else {
+                    return Ok(Arc::new(VfatFile{fs:self.fs.clone(),first_cluster:cluster,size}));
+                }
+            }
+        }
+        Err(crate::arch::x86_64::syscalls::ENOENT)
+    }
+    fn create(&self,_n:&str,_i:bool,_m:u32,_u:u32,_g:u32)->Result<Arc<dyn FileNode>,u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
+    fn truncate(&self,_:usize)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
+    fn stat(&self)->crate::arch::x86_64::syscalls::Stat{crate::arch::x86_64::syscalls::Stat::default()}
+    fn is_dir(&self)->bool{true}
+    fn size(&self)->usize{0}
+    fn list_dir(&self)->Result<Vec<(String,bool)>,u64> {
+        let mut out=Vec::new();
+        self.fs.list_entries(self.first_cluster,&mut out);
+        Ok(out.into_iter().map(|e|(e.0,e.1)).collect())
+    }
+    fn unlink(&self,_:&str)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
+    fn rename(&self,_:&str)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
+    fn link(&self,_n:&str,_t:Arc<dyn FileNode>)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
+    fn symlink(&self,_n:&str,_t:&str)->Result<Arc<dyn FileNode>,u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
+    fn chmod(&self,_m:u32)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
+    fn chown(&self,_uid:u32,_gid:u32)->Result<(),u64>{Err(crate::arch::x86_64::syscalls::ENOSYS)}
+    fn read_link(&self)->Result<String,u64>{Err(crate::arch::x86_64::syscalls::EINVAL)}
+    fn cache_id(&self)->u64{0}
+}
+
 impl FileNode for VfatFile {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, u64> {
         let n = (self.size - offset).min(buf.len());
         if offset >= self.size { return Ok(0); }
+        // Walk cluster chain
         let cl_size = self.fs.cluster_size();
         let mut data_off = 0usize;
         let mut cluster = self.first_cluster;
