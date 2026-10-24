@@ -18,6 +18,7 @@ use crate::arch::x86_64::cpu::*;
 use crate::arch::x86_64::msr::*;
 use crate::arch::x86_64::tss::set_rsp0;
 use crate::fs::*;
+use crate::module;
 use crate::fs::vfs::*;
 use crate::interrupts::STDIN_BUFFER;
 use crate::memory::FRAME_ALLOCATOR;
@@ -717,6 +718,8 @@ pub extern "C" fn syscall_rust_handler(
         // rather than the group id; getpgrp was not dispatched at all, so a
         // shell asking "who owns the terminal" got ENOSYS.
         172 => misc::sys_seccomp(arg1 as i32, arg2 as i32, arg3),
+        175 => module::sys_init_module(arg1, arg2 as usize, arg3),
+        313 => module::sys_finit_module(arg1 as i32, arg2, arg3 as i32),
         173 => sys_getpgrp(),
         110 => sys_getppid(),
         111 => with_current_process(|p| p.pid),
