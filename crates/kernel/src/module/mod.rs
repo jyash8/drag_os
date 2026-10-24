@@ -103,7 +103,7 @@ pub fn sys_init_module(image: u64, len: usize, _uargs: u64) -> u64 {
     };
     {
         let p = thread.process.lock();
-        if p.euid != 0 {
+        if p.euid != 0 && (p.caps & (1u32 << 16)) == 0 {
             return EPERM;
         }
     }

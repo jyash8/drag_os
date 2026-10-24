@@ -1303,6 +1303,7 @@ pub fn register_exec_thread(cr3: PhysAddr, uid: u32, gid: u32, exe_path: &str) {
     p.gid = gid;
     p.egid = gid;
     p.sgid = gid;
+    p.caps = if uid == 0 { crate::fs::perm::CAP_ALL } else { 0 };
     p.exe_path = alloc::string::String::from(exe_path);
     let process = Arc::new(SpinLock::new(p));
     PROCESS_TABLE
