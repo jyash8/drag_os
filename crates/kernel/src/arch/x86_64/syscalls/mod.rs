@@ -598,22 +598,55 @@ pub extern "C" fn syscall_rust_handler(
                     res
                 } else {
                     // Check if fd is a PRIME dma-buf (synthetic fd from PRIME_HANDLE_TO_FD)
-                    // These fds are not real OpenFiles but are tracked in GLOBAL_DRM.prime_handles
-                    let prime_phys = {
-                        let drm = crate::drivers::drm::GLOBAL_DRM.lock();
-                        if let Some(dev) = drm.as_ref() {
-                            if let Some(&handle) = dev.prime_handles.get(&fd) {
-                                dev.find_dumb(handle).map(|db| (db.phys.0, db.size))
-                            } else { None }
+                    // These fds are real OpenFiles backed by VNode::DmaBuf, so resolve the
+                    // fd's vnode directly — this works for any fd number in any process,
+                    // not just the exporter's number.
+                    let dma_buf_phys = {
+                        let t = crate::tasks::current_thread();
+                        if let Some(t) = t {
+                            let p = t.process.lock();
+                            let of_opt = p.fd_table.get(fd as usize).cloned().flatten();
+                            drop(p);
+                            match of_opt {
+                                Some(of) => {
+                                    let ofg = of.lock();
+                                    let handle = match &ofg.vnode {
+                                        crate::fs::vfs::VNode::DmaBuf(db) => Some(db.lock().handle),
+                                        _ => None,
+                                    };
+                                    drop(ofg); // release fd-table lock before touching GLOBAL_DRM
+                                    let drm = crate::drivers::drm::GLOBAL_DRM.lock();
+                                    drm.as_ref().and_then(|dev| {
+                                        handle.and_then(|h| dev.find_dumb(h).map(|b| (b.phys.0, b.size)))
+                                    })
+                                }
+                                None => None,
+                            }
                         } else { None }
                     };
-                    if let Some((phys, size)) = prime_phys {
+                    if let Some((phys, size)) = dma_buf_phys {
                         let len = if arg2 == 0 { size as usize } else { arg2 as usize };
                         let res = mmap_device(phys, len, arg3, arg4 | MAP_DEVICE);
-                        if cfg!(feature = "dsp_verbose") { crate::dprintln!("[mmap prime] fd={} handle->phys={:#x} len={:#x} -> ret={:#x}", fd, phys, len, res); }
+                        if cfg!(feature = "dsp_verbose") { crate::dprintln!("[mmap dma-buf] fd={} phys={:#x} len={:#x} -> ret={:#x}", fd, phys, len, res); }
                         res
                     } else {
-                        crate::memory::filemmap::mmap_file(arg1, arg2 as usize, arg3, arg4, fd, off)
+                        // Keep the existing `prime_phys` table lookup as fallback, then `mmap_file`.
+                        let prime_phys = {
+                            let drm = crate::drivers::drm::GLOBAL_DRM.lock();
+                            if let Some(dev) = drm.as_ref() {
+                                if let Some(&handle) = dev.prime_handles.get(&fd) {
+                                    dev.find_dumb(handle).map(|db| (db.phys.0, db.size))
+                                } else { None }
+                            } else { None }
+                        };
+                        if let Some((phys, size)) = prime_phys {
+                            let len = if arg2 == 0 { size as usize } else { arg2 as usize };
+                            let res = mmap_device(phys, len, arg3, arg4 | MAP_DEVICE);
+                            if cfg!(feature = "dsp_verbose") { crate::dprintln!("[mmap prime] fd={} handle->phys={:#x} len={:#x} -> ret={:#x}", fd, phys, len, res); }
+                            res
+                        } else {
+                            crate::memory::filemmap::mmap_file(arg1, arg2 as usize, arg3, arg4, fd, off)
+                        }
                     }
                 }
             }
