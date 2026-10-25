@@ -1130,6 +1130,19 @@ if [ -f "$ROOT/initrd/primeprobe.c" ]; then
     && cp -p "/tmp/opencode/primeprobe" "$ROOT/initrd/primeprobe" \
     && echo "[build-fs] primeprobe built from source"
 fi
+
+# Atomic modeset + page flip + event guest probe.
+# Verifies TEST_ONLY no-op, real commit applies fb, and flip-complete event
+# drains with matching user_data.
+if [ -f "$ROOT/initrd/atomicprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/atomicprobe" "$ROOT/initrd/atomicprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/atomicprobe" \
+    && cp -p "/tmp/opencode/atomicprobe" "$STAGING/bin/atomicprobe" \
+    && stage_bin_with_libs "/tmp/opencode/atomicprobe" \
+    && cp -p "/tmp/opencode/atomicprobe" "$STAGING/usr/bin/atomicprobe" \
+    && cp -p "/tmp/opencode/atomicprobe" "$ROOT/initrd/atomicprobe" \
+    && echo "[build-fs] atomicprobe built from source"
+fi
 if [ -f /tmp/opencode/vidtest.rgb32 ]; then
   cp -p /tmp/opencode/vidtest.rgb32 "$STAGING/vidtest.rgb32"
 fi

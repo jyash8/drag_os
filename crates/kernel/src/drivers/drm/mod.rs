@@ -1850,6 +1850,18 @@ fn handle_atomic_commit(argp: u64) -> u64 {
                 if let Some(y) = pu.src_y { pl.src_y = y << 16; }
                 if let Some(w) = pu.src_w { pl.src_w = w << 16; }
                 if let Some(h) = pu.src_h { pl.src_h = h << 16; }
+
+                // Mirror the primary plane's fb onto its CRTC so that
+                // MODE_GETCRTC after an atomic commit reports the active
+                // scanout buffer (Linux keeps crtc->fb_id in sync with the
+                // primary plane's fb during atomic commits). Non-primary
+                // planes have no CRTC-scanned fb, so skip them here.
+                if pu.fb_id.is_some() && pl.plane_type == DRM_PLANE_TYPE_PRIMARY {
+                    let target_crtc_id = pu.crtc_id.unwrap_or(pl.crtc_id);
+                    if let Some(crtc) = d.crtcs.iter_mut().find(|c| c.id == target_crtc_id) {
+                        crtc.fb_id = pu.fb_id.unwrap();
+                    }
+                }
             }
 
             let (new_s, crtc_id, fb_id, pl_id, pl_type) = {

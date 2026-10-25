@@ -57,6 +57,14 @@ TestCase {
             timeout_secs: 60,
             gl_only: false,
         },
+        // Atomic modeset + page flip + event drain probe.
+        TestCase {
+            name: "atomicprobe",
+            command: "/usr/bin/atomicprobe; echo ATOMIC_RC=$?",
+            expected: &["ATOMIC_PROBE_PASS", "ATOMIC_RC=0"],
+            timeout_secs: 60,
+            gl_only: false,
+        },
 TestCase {
             name: "module_selftest",
             command: "true",
