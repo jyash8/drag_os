@@ -78,7 +78,7 @@ for lib in ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libgcc_s.so.1 libgbm.so.1 li
            libinput.so.10 libpixman-1.so.0 libxkbcommon.so.0 libdrm.so.2 libevdev.so.2 libexpat.so.1 \
            libffi.so.8 libglib-2.0.so.0 libgobject-2.0.so.0 libgudev-1.0.so.0 liblua5.4.so.5.4 \
            libmtdev.so.1 libpcre2-8.so.0 libsystemd.so.0 libwacom.so.9 libcap.so.2 libz.so.1 libzstd.so.1 \
-           libgallium-*.so libLLVM.so.22.1 libSPIRV-Tools.so libsensors.so.5 \
+           libgallium-*.so libLLVM.so.23.1 libSPIRV-Tools.so libsensors.so.5 \
            libxcb.so.1 libxcb-randr.so.0 libxcb-sync.so.1 libxcb-present.so.0 libxshmfence.so.1 \
            libxcb-xfixes.so.0 libxcb-dri3.so.0 libelf.so.1 libdrm_amdgpu.so.1 libdrm_intel.so.1 \
            libX11-xcb.so.1 libstdc++.so.6 libedit.so.0 libxml2.so.16 libXau.so.6 libXdmcp.so.6 \
@@ -667,6 +667,7 @@ cat << 'EOF' > "$STAGING"/etc/draginit/05-dbus.toml
 [daemon]
 name = "dbus-daemon"
 path = "/usr/bin/dbus-daemon"
+args = ["--config-file=/usr/share/dbus-1/session.conf", "--nosyslog", "--nopidfile"]
 uid = 1000
 gid = 1000
 delay_ms = 0
@@ -674,7 +675,7 @@ restart = "never"
 restart_delay_ms = 2000
 [daemon.env]
 DBUS_SESSION_BUS_ADDRESS = "unix:path=/run/user/1000/bus"
-EOF
+XDG_RUNTIME_DIR = "/run/user/1000"
 
 cat << 'EOF' > "$STAGING"/etc/draginit/15-xdg-portal.toml
 [daemon]

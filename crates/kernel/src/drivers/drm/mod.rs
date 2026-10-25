@@ -4023,6 +4023,13 @@ fn handle_prime_handle_to_fd(argp: u64) -> u64 {
     crate::tasks::set_current_thread(Some(t));
 
     req.fd = fd_num;
+    // Register the prime fd with the global handle registry so that
+    // mmap() (which maps via GLOBAL_DRM.prime_handles) can resolve it
+    // to the underlying dumb-buffer physical memory.  Without this, the
+    // VFS fd is readable (as a VNode::DmaBuf) but unmappable.
+    GLOBAL_DRM.lock().as_mut().map(|d| {
+        d.prime_handles.insert(fd_num as u32, req.handle);
+    });
     crate::dprintln!("[PRIME] handle_to_fd: handle={} -> vfs fd={} (size={} blob={})",
                      req.handle, fd_num, db_size, db_is_blob);
     0

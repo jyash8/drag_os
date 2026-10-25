@@ -1225,6 +1225,14 @@ pub(super) fn sys_ioctl(fd: usize, cmd: u64, argp: u64) -> u64 {
                 drop(open_file);
                 return crate::drivers::drm::drm_ioctl(cmd, argp);
             }
+            crate::fs::vfs::VNode::DmaBuf(_) => {
+                drop(open_file);
+                // DMA_BUF_IOCTL_SYNC: _IOWR('b', 0, struct dma_buf_sync), size 8
+                if (cmd & 0xffffff00) == 0xc0086200 & 0xffffff00 {
+                    return 0;
+                }
+                return super::ENOTTY;
+            }
             crate::fs::vfs::VNode::InputEventDevice { minor }
             | crate::fs::vfs::VNode::InputMiceDevice { minor } => {
                 // ponytail: per-device caps from the live table; node freed

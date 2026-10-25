@@ -234,12 +234,13 @@ pub(super) fn sys_setgroups(size: usize, list: *const u32) -> u64 {
 
 
 pub(super) fn sys_clone(
-    flags: u64,
-    new_user_rsp: u64,
-    ptid_ptr: u64,
-    ctid_ptr: u64,
-    tls_val: u64,
-    r9_fn: u64,
+    sys_no: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    arg6: u64,
     regs: SyscallRegs,
 ) -> u64 {
     const CLONE_SETTLS: u64 = 0x0008_0000;
@@ -247,6 +248,47 @@ pub(super) fn sys_clone(
     const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
     const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
     const CLONE_THREAD: u64 = 0x0001_0000;
+
+    // clone3 (syscall 435) passes arguments via `struct clone_args` in userspace:
+    //   arg1 = pointer to struct clone_args, arg2 = size of struct
+    // struct clone_args (88 bytes):
+    //   [0] flags, [8] pidfd, [16] child_tid, [24] parent_tid,
+    //   [32] exit_signal, [40] stack, [48] stack_size, [56] tls, ...
+    let (flags, new_user_rsp, ptid_ptr, ctid_ptr, tls_val, r9_fn) =
+        if sys_no == 435 {
+            let args_ptr = arg1;
+            let args_size = arg2;
+            if args_size < 88 {
+                return EINVAL;
+            }
+            if !validate_user_read_range(args_ptr, 88) {
+                return EFAULT;
+            }
+            unsafe {
+                let args = &*(args_ptr as *const [u64; 11]);
+                crate::println!("[C3ARGS] flags={:#x} pidfd={:#x} child_tid={:#x} parent_tid={:#x} exitsig={:#x} stack={:#x} stack_sz={:#x} tls={:#x}",
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+                let clone_flags = args[0];
+                let child_tid = args[2];
+                let parent_tid = args[3];
+                let exit_signal = args[4] & 0xFFFF;
+                let stack = args[5];
+                let stack_size = args[6];
+                let tls = args[7];
+                // Merge exit_signal into the low 16 bits of flags
+                let flags = (clone_flags & !0xFFFF) | exit_signal;
+                // clone3: stack points to the LOWEST address; compute top
+                let user_stack = if stack != 0 && stack_size != 0 {
+                    stack + stack_size
+                } else {
+                    stack
+                };
+                // r9_fn unused for clone3: child continues from return point
+                (flags, user_stack, parent_tid, child_tid, tls, 0)
+            }
+        } else {
+            (arg1, arg2, arg3, arg4, arg5, arg6)
+        };
 
     let user_rip = crate::smp::with_cpu_state(|state| state.user_rip);
     let user_rflags = crate::smp::with_cpu_state(|state| state.user_rflags);

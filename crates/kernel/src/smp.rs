@@ -10,12 +10,13 @@ use shared::memory::address::PhysAddr;
 use crate::arch::{
     sync::spinlock::SpinLock,
     x86_64::{
+        cpu::read_cr3,
         gdt::Gdt,
         syscalls::CpuState,
         tss::TaskStateSegment,
     },
 };
-use crate::tasks::{Thread, STOPPED};
+use crate::tasks::{Thread, THREAD_FRAME_SIZE, STOPPED};
 
 pub const MAX_CPUS: usize = 4;
 
@@ -418,6 +419,12 @@ pub fn timer_tick_on_core(mut current_stack_ptr: u64) -> u64 {
     let mut cpu_slot = CPUS[cpu_id as usize].lock();
 
     if let Some(mut current) = cpu_slot.as_mut().unwrap().current.take() {
+        // INVARIANT: current.stack_ptr must always point at this thread's own
+        // CpuContext inside its kernel stack (kernel_stack_top - THREAD_FRAME_SIZE).
+        // Store it here so the thread has a persistent resume frame. This must
+        // run on *every* tick, including the int 0x81 yield path: a thread that
+        // blocks before the first timer tick (e.g. sh on stdin) would otherwise
+        // keep the consumed exec frame and double-fault on re-dispatch.
         current.stack_ptr = current_stack_ptr;
         current.fpu_save();
 
@@ -784,9 +791,33 @@ pub fn timer_tick_on_core(mut current_stack_ptr: u64) -> u64 {
                 };
                 crate::tasks::check_thread(&next, "cfs-pop");
                 if next.stack_ptr == 0 {
-                    // Invalid/uninitialized stack pointer — put back and keep running
+                    if next.id == curr_id {
+                        // No persistent resume frame exists yet, so the live
+                        // frame on this kernel stack IS this thread's resume
+                        // point. Keep it `current` and return; it must NOT stay
+                        // in the run queue, or a thread that is both `current`
+                        // and enqueued trips INV3 the moment it parks.
+                        cpu_slot.as_mut().unwrap().current = Some(next);
+                        return current_stack_ptr;
+                    }
+                    // Unreachable today: only the boot thread can lack a frame,
+                    // and while it does it is always `current`. Re-queue and
+                    // park rather than resume the wrong context.
                     queue.push_front(next);
-                    return current_stack_ptr;
+                    cpu_slot.as_mut().unwrap().current = None;
+                    drop(queue);
+                    drop(cpu_slot);
+                    unsafe {
+                        if crate::arch::x86_64::cpu::read_cr3()
+                            != crate::arch::x86_64::cpu::KERNEL_CR3
+                        {
+                            crate::arch::x86_64::cpu::write_cr3(
+                                crate::arch::x86_64::cpu::KERNEL_CR3,
+                            );
+                        }
+                        crate::arch::x86_64::cpu::sti();
+                    }
+                    cpu_idle_loop(cpu_id as usize);
                 }
 
                 // If the scheduler picked the exact same thread, avoid context switch overhead
@@ -1168,5 +1199,28 @@ pub fn assert_no_cpus_leak(at: &str) {
                 rip
             );
         }
+    }
+}
+
+/// Flush the TLB entry for a single page on this core.
+///
+/// Used after COW or demand-paging changes so that stale TLB translations
+/// don't let a core keep writing to a page that has been marked read-only or
+/// unmapped. Cross-core shootdowns via IPI are not yet implemented; on SMP
+/// systems this only flushes the local core.
+pub fn flush_tlb_page(addr: u64) {
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags));
+    }
+}
+
+/// Flush the entire TLB on this core.
+///
+/// Used after `fork_address_space` changes page-table entries across a wide
+/// range. Again, cross-core shootdowns are not yet implemented.
+pub fn flush_tlb_all_cores() {
+    unsafe {
+        let cr3 = crate::arch::x86_64::cpu::read_cr3();
+        core::arch::asm!("mov cr3, {}", in(reg) cr3.0 as u64, options(nostack, preserves_flags));
     }
 }

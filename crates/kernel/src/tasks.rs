@@ -94,9 +94,15 @@ pub fn build_child_kernel_stack(
     unsafe {
         *frame.add(0) = 0; // rax (fork returns 0 in child)
         *frame.add(1) = rbx;
-        // rcx, rdx, rsi, rdi are scratch
+        *frame.add(2) = 0; // rcx (scratch)
+        *frame.add(3) = 0; // rdx (scratch)
+        *frame.add(4) = 0; // rsi (scratch)
+        *frame.add(5) = 0; // rdi (scratch)
         *frame.add(6) = rbp;
-        *frame.add(8) = r9; // r9 (fn pointer in musl __clone!)
+        *frame.add(7) = 0; // r8 (scratch)
+        *frame.add(8) = r9; // r9
+        *frame.add(9) = 0; // r10 (scratch)
+        *frame.add(10) = 0; // r11 (scratch)
         *frame.add(11) = r12;
         *frame.add(12) = r13;
         *frame.add(13) = r14;
@@ -521,6 +527,16 @@ impl Thread {
         stack_limit: u64,
     ) -> Self {
         let nice = process.lock().nice;
+        // INVARIANT: stack_ptr must point inside this thread's kernel stack,
+        // at kernel_stack_top - THREAD_FRAME_SIZE (the CpuContext base).
+        // A wrong value here corrupts user registers on iretq (e.g. rsp=0x58).
+        if stack_ptr != 0 {
+            assert!(
+                stack_ptr == kernel_stack_top - THREAD_FRAME_SIZE as u64,
+                "Thread::new BAD STACK: tid={} stack_ptr={:#x} kernel_stack_top={:#x}",
+                id, stack_ptr, kernel_stack_top
+            );
+        }
         Self {
             id,
             process,
@@ -1723,8 +1739,18 @@ fn exit_thread_internal(exit_code: i32, is_group_exit: bool) -> ! {
                 }
                 crate::arch::x86_64::cpu::sti();
             }
-            crate::tprintln!("CPU{}: no runnable thread, entering idle loop",
-                crate::smp::current_cpu_id());
+            // Print the "idle" transition only occasionally: under low-frequency
+            // schedulers the old unconditional print made `cargo run -p tools
+            // -- run` scroll faster than any single QEMU window refresh.
+            let now = crate::time::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+            static LAST_IDLE_PRINT: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let last = LAST_IDLE_PRINT.load(core::sync::atomic::Ordering::Relaxed);
+            if last == 0 || now.saturating_sub(last) >= 10_000 {
+                LAST_IDLE_PRINT.store(now, core::sync::atomic::Ordering::Relaxed);
+                crate::tprintln!("CPU{}: no runnable thread, entering idle loop",
+                    crate::smp::current_cpu_id());
+            }
             let my_id = crate::smp::current_cpu_id() as usize;
             crate::smp::cpu_idle_loop(my_id)
         }
@@ -2256,16 +2282,32 @@ pub fn check_thread(t: &Thread, at: &str) {
         }
     }
     let rawproc = unsafe { core::ptr::read_volatile(&t.process as *const _ as *const u64) };
+    // `stack_ptr == 0` is the documented sentinel for "registered as `current`
+    // but never dispatched yet" (see `register_exec_thread`). It is not a
+    // corruption signal: the pop paths check for it explicitly right after
+    // this call. Reporting it as `bad` made every legitimately-parked initial
+    // thread trip the diagnostic during boot.
     let bad = rawproc == 0
         || !kernel_ptr_ok(rawproc)
         || !kernel_ptr_ok(t.kernel_stack_top)
         || !kernel_ptr_ok(t.syscall_stack_top)
-        || !thread_in_frame_ok(t);
+        || (t.stack_ptr != 0 && !thread_in_frame_ok(t));
     if bad && !INV_VIOLATED.load(core::sync::atomic::Ordering::Relaxed) {
         INV_VIOLATED.store(true, core::sync::atomic::Ordering::Relaxed);
+        // The diagnostic must not assume `stack_ptr` is readable: `bad` is also
+        // set when stack_ptr is 0 (thread registered but not yet dispatched) or
+        // otherwise outside the kernel range. Dereferencing it here turned a
+        // benign invariant report into a page fault at cr2=0x80 (CpuContext.cs
+        // is at offset 0x80, so a null stack_ptr read address 0x80).
+        let (cs, rip) = if kernel_ptr_ok(t.stack_ptr) && t.stack_ptr & 7 == 0 {
+            let ctx = unsafe { &*(t.stack_ptr as *const CpuContext) };
+            (ctx.cs, ctx.rip)
+        } else {
+            (u64::MAX, u64::MAX)
+        };
         crate::dprintln!("INV1[{}]: id={} thread={:#x} rawproc={:#x} stack={:#x} kstack={:#x} sstack={:#x} cs={:#x} rip={:#x}",
             at, t.id, &t as *const _ as u64, rawproc, t.stack_ptr, t.kernel_stack_top, t.syscall_stack_top,
-            unsafe { (*(t.stack_ptr as *const CpuContext)).cs }, unsafe { (*(t.stack_ptr as *const CpuContext)).rip });
+            cs, rip);
         // ponytail: don't panic in production, allow ls to proceed and return to shell
         INV_VIOLATED.store(false, core::sync::atomic::Ordering::Relaxed);
         return;
@@ -2588,8 +2630,8 @@ pub struct DjEntry {
 }
 pub static DISPATCH_J: [crate::arch::sync::spinlock::SpinLock<[DjEntry; 8]>; 4] =
     [const { crate::arch::sync::spinlock::SpinLock::new([DjEntry { tid: u64::MAX, sp: 0, rip: 0, top: 0, in_range: false }; 8]) }; 4];
-pub static DISPATCH_JIDX: [core::sync::atomic::AtomicU64; 4] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; 4];
+pub static DISPATCH_JIDX: [core::sync::atomic::AtomicUsize; 4] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 4];
 
 pub fn debug_journal_dispatch(t: &Thread, sp: u64) {
     let cpu = crate::smp::current_cpu_id() as usize;
