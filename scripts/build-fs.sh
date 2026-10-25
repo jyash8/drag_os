@@ -839,14 +839,6 @@ WAYLAND_DISPLAY = "/run/user/1000/wayland-1"
 LD_LIBRARY_PATH = "/lib:/usr/lib"
 VK_ICD_FILENAMES = "/usr/share/vulkan/icd.d/virtio_icd.json"
 EOF
-cat << 'EOF' > "$STAGING"/etc/draginit/50-shell.toml
-[daemon]
-name = "shell"
-path = "/usr/bin/ptyrun"
-args = ["/bin/sh"]
-delay_ms = 2000
-restart = "never"
-EOF
 
 # Startup init script
 cat << 'EOF' > "$STAGING"/bin/init.sh
