@@ -4096,6 +4096,13 @@ fn handle_prime_fd_to_handle(argp: u64) -> u64 {
         }
     }
 
+    // Register the imported fd so that mmap() in this process can resolve
+    // the fd number to the BO physical memory via GLOBAL_DRM.prime_handles
+    // (mirrors handle_prime_handle_to_fd's export registration).
+    GLOBAL_DRM.lock().as_mut().map(|d| {
+        d.prime_handles.insert(fd as u32, handle);
+    });
+
     req.handle = handle;
     crate::dprintln!("[PRIME] fd_to_handle: vfs fd={} -> handle={} res_id={:?}", fd, handle, res_id);
     0
