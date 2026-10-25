@@ -1227,9 +1227,18 @@ pub(super) fn sys_ioctl(fd: usize, cmd: u64, argp: u64) -> u64 {
             }
             crate::fs::vfs::VNode::DmaBuf(_) => {
                 drop(open_file);
-                // DMA_BUF_IOCTL_SYNC: _IOWR('b', 0, struct dma_buf_sync), size 8
-                if (cmd & 0xffffff00) == 0xc0086200 & 0xffffff00 {
-                    return 0;
+                if cmd == drm_uapi::DMA_BUF_IOCTL_SYNC {
+                    if !validate_user_read_range(argp, 8) {
+                        return EFAULT;
+                    }
+                    let flags = unsafe { core::ptr::read_unaligned(argp as *const u64) };
+                    const SYNC_MASK: u64 = (drm_uapi::DMA_BUF_SYNC_RW
+                        | drm_uapi::DMA_BUF_SYNC_START
+                        | drm_uapi::DMA_BUF_SYNC_END) as u64;
+                    if flags & !SYNC_MASK != 0 {
+                        return EINVAL;
+                    }
+                    return 0; // memory is shared/coherent; sync is a no-op
                 }
                 return super::ENOTTY;
             }
