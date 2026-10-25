@@ -65,6 +65,14 @@ TestCase {
             timeout_secs: 60,
             gl_only: false,
         },
+        // Property GET + propblob round-trip probe.
+        TestCase {
+            name: "propblobprobe",
+            command: "/usr/bin/propblobprobe; echo PROPBLOB_RC=$?",
+            expected: &["PROPBLOB_PROBE_PASS", "PROPBLOB_RC=0"],
+            timeout_secs: 60,
+            gl_only: false,
+        },
 TestCase {
             name: "module_selftest",
             command: "true",

@@ -1143,6 +1143,19 @@ if [ -f "$ROOT/initrd/atomicprobe.c" ]; then
     && cp -p "/tmp/opencode/atomicprobe" "$ROOT/initrd/atomicprobe" \
     && echo "[build-fs] atomicprobe built from source"
 fi
+
+# Property GET + propblob round-trip guest probe.
+# Verifies MODE_GETPROPERTY returns expected properties and
+# CREATEPROPBLOB/GETPROPBLOB/DESTROYPROPBLOB round-trip correctly.
+if [ -f "$ROOT/initrd/propblobprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/propblobprobe" "$ROOT/initrd/propblobprobe.c" 2>/dev/null \
+    && chmod +x "/tmp/opencode/propblobprobe" \
+    && cp -p "/tmp/opencode/propblobprobe" "$STAGING/bin/propblobprobe" \
+    && stage_bin_with_libs "/tmp/opencode/propblobprobe" \
+    && cp -p "/tmp/opencode/propblobprobe" "$STAGING/usr/bin/propblobprobe" \
+    && cp -p "/tmp/opencode/propblobprobe" "$ROOT/initrd/propblobprobe" \
+    && echo "[build-fs] propblobprobe built from source"
+fi
 if [ -f /tmp/opencode/vidtest.rgb32 ]; then
   cp -p /tmp/opencode/vidtest.rgb32 "$STAGING/vidtest.rgb32"
 fi
