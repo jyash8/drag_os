@@ -48,6 +48,15 @@ TestCase {
             timeout_secs: 10,
             gl_only: false,
         },
+        // PRIME dma-buf cross-process probe: export a dumb buffer to a dma-buf
+        // fd, mmap it, fork, re-import in the child and read back the pattern.
+        TestCase {
+            name: "primeprobe",
+            command: "/usr/bin/primeprobe; echo PRIME_RC=$?",
+            expected: &["PRIME_PROBE_PASS", "PRIME_RC=0"],
+            timeout_secs: 60,
+            gl_only: false,
+        },
 TestCase {
             name: "module_selftest",
             command: "true",

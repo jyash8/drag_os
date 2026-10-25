@@ -1125,6 +1125,19 @@ if [ -f "$ROOT/initrd/fixed_size_test.c" ] && command -v wayland-scanner >/dev/n
     && cp -p "/tmp/opencode/fixed_size_test" "$ROOT/initrd/fixed_size_test" \
     && echo "[build-fs] fixed_size_test built from source"
 fi
+
+# PRIME dma-buf cross-process probe: export a dumb buffer to a dma-buf fd,
+# mmap it, fork, re-import in the child and read back the pattern.
+# Verifies PRIME_HANDLE_TO_FD, PRIME_FD_TO_HANDLE and dma-buf fd mmap.
+if [ -f "$ROOT/initrd/primeprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/primeprobe" "$ROOT/initrd/primeprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/primeprobe" \
+    && cp -p "/tmp/opencode/primeprobe" "$STAGING/bin/primeprobe" \
+    && stage_bin_with_libs "/tmp/opencode/primeprobe" \
+    && cp -p "/tmp/opencode/primeprobe" "$STAGING/usr/bin/primeprobe" \
+    && cp -p "/tmp/opencode/primeprobe" "$ROOT/initrd/primeprobe" \
+    && echo "[build-fs] primeprobe built from source"
+fi
 if [ -f /tmp/opencode/vidtest.rgb32 ]; then
   cp -p /tmp/opencode/vidtest.rgb32 "$STAGING/vidtest.rgb32"
 fi
