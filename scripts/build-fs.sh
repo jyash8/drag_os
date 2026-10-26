@@ -1165,6 +1165,17 @@ if [ -f "$ROOT/initrd/vtprobe.c" ]; then
     && echo "[build-fs] vtprobe built from source"
 fi
 
+# ctxprobe context_init capset verify probe.
+if [ -f "$ROOT/initrd/ctxprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/ctxprobe" "$ROOT/initrd/ctxprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/ctxprobe" \
+    && cp -p "/tmp/opencode/ctxprobe" "$STAGING/bin/ctxprobe" \
+    && stage_bin_with_libs "/tmp/opencode/ctxprobe" \
+    && cp -p "/tmp/opencode/ctxprobe" "$STAGING/usr/bin/ctxprobe" \
+    && cp -p "/tmp/opencode/ctxprobe" "$ROOT/initrd/ctxprobe" \
+    && echo "[build-fs] ctxprobe built from source"
+fi
+
 # Atomic modeset + page flip + event guest probe.
 # Verifies TEST_ONLY no-op, real commit applies fb, and flip-complete event
 # drains with matching user_data.

@@ -48,6 +48,13 @@ TestCase {
             timeout_secs: 10,
             gl_only: false,
         },
+        TestCase {
+            name: "ctxprobe",
+            command: "/usr/bin/ctxprobe; echo CTX_RC=$?",
+            expected: &["CTX_PROBE_PASS", "CTX_RC=0"],
+            timeout_secs: 30,
+            gl_only: false,
+        },
         // PRIME dma-buf cross-process probe: export a dumb buffer to a dma-buf
         // fd, mmap it, fork, re-import in the child and read back the pattern.
         TestCase {
