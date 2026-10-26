@@ -1131,6 +1131,7 @@ if [ -f "$ROOT/initrd/primeprobe.c" ]; then
     && echo "[build-fs] primeprobe built from source"
 fi
 
+
 # Atomic modeset + page flip + event guest probe.
 # Verifies TEST_ONLY no-op, real commit applies fb, and flip-complete event
 # drains with matching user_data.
@@ -1156,6 +1157,7 @@ if [ -f "$ROOT/initrd/propblobprobe.c" ]; then
     && cp -p "/tmp/opencode/propblobprobe" "$ROOT/initrd/propblobprobe" \
     && echo "[build-fs] propblobprobe built from source"
 fi
+
 if [ -f /tmp/opencode/vidtest.rgb32 ]; then
   cp -p /tmp/opencode/vidtest.rgb32 "$STAGING/vidtest.rgb32"
 fi
@@ -1295,7 +1297,10 @@ fi
 [ -f /home/jyash8/Projects/drag_os/initrd/poweroff ] && cp -p /home/jyash8/Projects/drag_os/initrd/poweroff "$STAGING"/bin/poweroff
 BUSYBOX="$ROOT/vendor/busybox-1.36.1/busybox"
 if [ -f "$BUSYBOX" ]; then
-  for applet in busybox mount mkdir umount; do
+  # Copy busybox once per applet name so multi-call invocation works
+  # (busybox dispatches on argv[0]). Network applets are needed to bring
+  # up eth0 under QEMU user-mode networking (DHCP) so curl/wget/ssh work.
+  for applet in busybox mount mkdir umount ip udhcpc ifconfig route; do
     cp -p "$BUSYBOX" "$STAGING"/bin/$applet
     chmod +x "$STAGING"/bin/$applet
   done
