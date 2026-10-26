@@ -385,6 +385,19 @@ pub const DMA_BUF_IOCTL_SYNC: u64 = ioc(
     core::mem::size_of::<DmaBufSync>() as u32,
 );
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DrmModeCrtcLut {
+    pub crtc_id: u32,
+    pub gamma_size: u32,
+    pub red: u64,
+    pub green: u64,
+    pub blue: u64,
+}
+
+// Size pin: 32 bytes (matches DRM_IOCTL_MODE_GETGAMMA/SETGAMMA payload).
+const _: () = assert!(core::mem::size_of::<DrmModeCrtcLut>() == 32);
+
 pub const DRM_CAP_DUMB_BUFFER: u64 = 1;
 pub const DRM_CAP_VBLANK_HIGH_CRTC: u64 = 2;
 pub const DRM_CAP_DUMB_PREFERRED_DEPTH: u64 = 3;

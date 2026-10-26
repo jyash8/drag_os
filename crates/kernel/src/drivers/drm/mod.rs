@@ -788,6 +788,10 @@ pub fn drm_init() {
         active: true,
         x: 0,
         y: 0,
+        gamma_size: 256,
+        gamma_red: alloc::vec![0u16; 256],
+        gamma_green: alloc::vec![0u16; 256],
+        gamma_blue: alloc::vec![0u16; 256],
     });
 
     // Encoder id=2  (TMDS = HDMI/DVI digital)
@@ -901,8 +905,8 @@ pub fn drm_ioctl(cmd: u64, argp: u64) -> u64 {
         DRM_IOCTL_MODE_SETCRTC => handle_set_crtc(argp),
         DRM_IOCTL_MODE_GETENCODER => handle_get_encoder(argp),
         DRM_IOCTL_MODE_GETCONNECTOR => handle_get_connector(argp),
-        DRM_IOCTL_MODE_GETGAMMA => 0,
-        DRM_IOCTL_MODE_SETGAMMA => 0,
+        DRM_IOCTL_MODE_GETGAMMA => handle_get_gamma(argp),
+        DRM_IOCTL_MODE_SETGAMMA => handle_set_gamma(argp),
         DRM_IOCTL_MODE_OBJ_GETPROPERTIES => handle_obj_get_properties(argp),
         DRM_IOCTL_MODE_GETPROPERTY => handle_get_property(argp),
         DRM_IOCTL_MODE_GETPROPBLOB => handle_get_prop_blob(argp),
@@ -3360,6 +3364,132 @@ fn handle_page_flip(argp: u64) -> u64 {
     } else {
         EINVAL
     }
+}
+
+// ── DRM_IOCTL_MODE_{G,S}ETGAMMA (0xA4 / 0xA5) ──────────────────────────────
+//
+// Gamma ramp storage per CRTC. QEMU's virtio-gpu has no hardware gamma LUT, so
+// these are round-trip storage only: SETGAMMA accepts + stores ramps on the
+// crtc, GETGAMMA copies them back into the user buffer. This matches the
+// upstream no-LUT behaviour closely enough that a probing/gammaprobe test is
+// stable and libdrm callers that `GETGAMMA` for gamma_size never see ENOTTY.
+
+fn lookup_crtc_gamma_mut(dev: &mut crate::drivers::drm::types::DrmDevice, id: u32) -> Option<usize> {
+    dev.crtcs.iter().position(|c| c.id == id)
+}
+
+fn handle_get_gamma(argp: u64) -> u64 {
+    if !vr_read(argp, core::mem::size_of::<drm_uapi::DrmModeCrtcLut>()) {
+        return EFAULT;
+    }
+    let p = unsafe { &mut *(argp as *mut drm_uapi::DrmModeCrtcLut) };
+    let mut drm = GLOBAL_DRM.lock();
+    let d = match drm.as_mut() {
+        Some(d) => d,
+        None => return ENOSYS,
+    };
+    let idx = match lookup_crtc_gamma_mut(d, p.crtc_id) {
+        Some(i) => i,
+        None => return ENOENT,
+    };
+    let crtc = &d.crtcs[idx];
+    if p.gamma_size == 0 {
+        p.gamma_size = crtc.gamma_size;
+    } else {
+        // User requests a specific ramp size: only accept the stored size (or 0).
+        if p.gamma_size != crtc.gamma_size {
+            // Clamp: report current stored size
+            p.gamma_size = crtc.gamma_size;
+            drop(drm);
+            return EINVAL;
+        }
+    }
+    let len = crtc.gamma_size as usize;
+    // Copy ramps to user buffers if provided
+    if p.red != 0 && vr(p.red, len * 2) && crtc.gamma_red.is_empty() {
+        // nothing to copy (no stored data)
+    }
+    if p.red != 0 && vr(p.red, len * 2) {
+        unsafe {
+            let dst = core::slice::from_raw_parts_mut(p.red as *mut u16, len);
+            for i in 0..len {
+                dst[i] = if i < crtc.gamma_red.len() { crtc.gamma_red[i] } else { 0 };
+            }
+        }
+    }
+    if p.green != 0 && vr(p.green, len * 2) {
+        unsafe {
+            let dst = core::slice::from_raw_parts_mut(p.green as *mut u16, len);
+            for i in 0..len {
+                dst[i] = if i < crtc.gamma_green.len() { crtc.gamma_green[i] } else { 0 };
+            }
+        }
+    }
+    if p.blue != 0 && vr(p.blue, len * 2) {
+        unsafe {
+            let dst = core::slice::from_raw_parts_mut(p.blue as *mut u16, len);
+            for i in 0..len {
+                dst[i] = if i < crtc.gamma_blue.len() { crtc.gamma_blue[i] } else { 0 };
+            }
+        }
+    }
+    p.gamma_size = crtc.gamma_size;
+    0
+}
+
+fn handle_set_gamma(argp: u64) -> u64 {
+    if !vr_read(argp, core::mem::size_of::<drm_uapi::DrmModeCrtcLut>()) {
+        return EFAULT;
+    }
+    let p = unsafe { &*(argp as *const drm_uapi::DrmModeCrtcLut) };
+    let len = p.gamma_size as usize;
+    if len > 256 {
+        return EINVAL;
+    }
+    // Validate pointers if ramps are supplied
+    if len > 0 && p.red != 0 {
+        if !vr_read(p.red, len * 2) { return EFAULT; }
+    }
+    if len > 0 && p.green != 0 {
+        if !vr_read(p.green, len * 2) { return EFAULT; }
+    }
+    if len > 0 && p.blue != 0 {
+        if !vr_read(p.blue, len * 2) { return EFAULT; }
+    }
+    let mut drm = GLOBAL_DRM.lock();
+    let d = match drm.as_mut() { Some(d) => d, None => return ENOSYS };
+    let idx = match lookup_crtc_gamma_mut(d, p.crtc_id) { Some(i) => i, None => return ENOENT };
+    let mut crtc = &mut d.crtcs[idx];
+    if len > 0 {
+        crtc.gamma_size = p.gamma_size;
+        crtc.gamma_red.clear();
+        crtc.gamma_green.clear();
+        crtc.gamma_blue.clear();
+        crtc.gamma_red.reserve(len);
+        crtc.gamma_green.reserve(len);
+        crtc.gamma_blue.reserve(len);
+        if p.red != 0 {
+            let src = unsafe { core::slice::from_raw_parts(p.red as *const u16, len) };
+            crtc.gamma_red.extend_from_slice(src);
+        } else {
+            crtc.gamma_red.resize(len, 0u16);
+        }
+        if p.green != 0 {
+            let src = unsafe { core::slice::from_raw_parts(p.green as *const u16, len) };
+            crtc.gamma_green.extend_from_slice(src);
+        } else {
+            crtc.gamma_green.resize(len, 0u16);
+        }
+        if p.blue != 0 {
+            let src = unsafe { core::slice::from_raw_parts(p.blue as *const u16, len) };
+            crtc.gamma_blue.extend_from_slice(src);
+        } else {
+            crtc.gamma_blue.resize(len, 0u16);
+        }
+    } else {
+        // len == 0 → zero gamma_size? Keep current (legacy).
+    }
+    0
 }
 
 // ── DRM_IOCTL_MODE_DIRTYFB ───────────────────────────────────────────────────
