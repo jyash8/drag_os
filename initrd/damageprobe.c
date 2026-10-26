@@ -75,7 +75,7 @@ int main(void) {
         struct drg_drm_mode_fb_dirty_cmd d = {0};
         d.fb_id=fb_id; d.num_clips=3; d.flags=DRM_MODE_FB_DIRTY_ANNOTATE_COPY;
         d.clips_ptr = (uintptr_t)clips;
-        STAGE(6); CHECK(ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &d) == EINVAL);
+        STAGE(6); { int _r=ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &d); printf("stage6 rc=%d errno=%d\n",_r,errno); CHECK(_r <0 && errno==EINVAL); }
     }
     /* huge count (>256) → full transfer, success */
     {
@@ -88,7 +88,7 @@ int main(void) {
     {
         struct drg_drm_mode_fb_dirty_cmd d = {0};
         d.fb_id=99999; d.num_clips=0;
-        STAGE(8); CHECK(ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &d) == ENOENT);
+        STAGE(8); { int _r=ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &d); printf("stage8 rc=%d errno=%d\n",_r,errno); CHECK(_r<0 && errno==ENOENT); }
     }
     /* unreadable clips_ptr (addr at high unreachable) → EFAULT */
     {
@@ -96,7 +96,7 @@ int main(void) {
         struct drg_drm_mode_fb_dirty_cmd d = {0};
         d.fb_id=fb_id; d.num_clips=1; d.flags=0;
         d.clips_ptr = (uintptr_t)0x90000000;
-        STAGE(9); CHECK(ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &d) == EFAULT);
+        STAGE(9); { int _r=ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &d); printf("stage9 rc=%d errno=%d\n",_r,errno); CHECK(_r<0 && errno==EFAULT); }
     }
     printf("DAMAGE_PROBE_PASS\n");
     return 0;
