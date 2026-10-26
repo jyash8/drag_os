@@ -1132,6 +1132,39 @@ if [ -f "$ROOT/initrd/primeprobe.c" ]; then
 fi
 
 
+# Gamma GET/SET guest probe.
+if [ -f "$ROOT/initrd/gammaprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/gammaprobe" "$ROOT/initrd/gammaprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/gammaprobe" \
+    && cp -p "/tmp/opencode/gammaprobe" "$STAGING/bin/gammaprobe" \
+    && stage_bin_with_libs "/tmp/opencode/gammaprobe" \
+    && cp -p "/tmp/opencode/gammaprobe" "$STAGING/usr/bin/gammaprobe" \
+    && cp -p "/tmp/opencode/gammaprobe" "$ROOT/initrd/gammaprobe" \
+    && echo "[build-fs] gammaprobe built from source"
+fi
+
+# DIRTYFB damage clipping probe.
+if [ -f "$ROOT/initrd/damageprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/damageprobe" "$ROOT/initrd/damageprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/damageprobe" \
+    && cp -p "/tmp/opencode/damageprobe" "$STAGING/bin/damageprobe" \
+    && stage_bin_with_libs "/tmp/opencode/damageprobe" \
+    && cp -p "/tmp/opencode/damageprobe" "$STAGING/usr/bin/damageprobe" \
+    && cp -p "/tmp/opencode/damageprobe" "$ROOT/initrd/damageprobe" \
+    && echo "[build-fs] damageprobe built from source"
+fi
+
+# VT activate + KDSETMODE probe.
+if [ -f "$ROOT/initrd/vtprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/vtprobe" "$ROOT/initrd/vtprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/vtprobe" \
+    && cp -p "/tmp/opencode/vtprobe" "$STAGING/bin/vtprobe" \
+    && stage_bin_with_libs "/tmp/opencode/vtprobe" \
+    && cp -p "/tmp/opencode/vtprobe" "$STAGING/usr/bin/vtprobe" \
+    && cp -p "/tmp/opencode/vtprobe" "$ROOT/initrd/vtprobe" \
+    && echo "[build-fs] vtprobe built from source"
+fi
+
 # Atomic modeset + page flip + event guest probe.
 # Verifies TEST_ONLY no-op, real commit applies fb, and flip-complete event
 # drains with matching user_data.
