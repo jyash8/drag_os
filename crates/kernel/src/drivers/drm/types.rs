@@ -18,7 +18,7 @@ pub struct DrmModeResolution {
     pub preferred: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DrmCrtcState {
     pub id: u32,
     pub connector_id: u32,
@@ -29,10 +29,6 @@ pub struct DrmCrtcState {
     pub active: bool,
     pub x: u32,
     pub y: u32,
-    pub gamma_size: u32,
-    pub gamma_red: alloc::vec::Vec<u16>,
-    pub gamma_green: alloc::vec::Vec<u16>,
-    pub gamma_blue: alloc::vec::Vec<u16>,
 }
 
 #[derive(Debug, Clone)]
