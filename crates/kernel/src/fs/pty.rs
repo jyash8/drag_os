@@ -103,11 +103,16 @@ pub struct PtyPair {
     /// Slave writes into `s2m`, master reads from `s2m`.
     pub s2m: VecDeque<u8>,
 
+    /// True after VEOF (^D) pressed on an empty canonical line. The next
+    /// slave read returns 0 (EOF) instead of blocking. Cleared when the
+    /// EOF is actually returned to the slave.
+    pub eof_pending: bool,
+
     pub master_open: bool,
     pub slave_open: bool,
     /// Open-description counts per side. dup()/fork() share one OpenFile
     /// (one description) so only open()/last-close move these. The bools
-    /// above are derived from the counters — never set them directly.
+    /// above are derived from the counters.
     pub master_count: u32,
     pub slave_count: u32,
 }
@@ -127,6 +132,7 @@ impl PtyPair {
             m2s: VecDeque::with_capacity(1024),
             canon_buf: VecDeque::with_capacity(256),
             s2m: VecDeque::with_capacity(1024),
+            eof_pending: false,
             master_open: true,
             slave_open: false,
             master_count: 0,
@@ -256,10 +262,14 @@ impl PtyPair {
                                 }
                             }
                         } else if c == v_eof && v_eof != 0 {
-                            while let Some(ch) = self.canon_buf.pop_front() {
-                                self.m2s.push_back(ch);
+                            if self.canon_buf.is_empty() {
+                                self.eof_pending = true;
+                            } else {
+                                while let Some(ch) = self.canon_buf.pop_front() {
+                                    self.m2s.push_back(ch);
+                                }
+                                committed = true;
                             }
-                            committed = true;
                         } else {
                             if self.canon_buf.len() < PTY_BUF_CAPACITY {
                                 self.canon_buf.push_back(c);
@@ -306,6 +316,11 @@ impl PtyPair {
                 }
                 wake_pipe_waiters();
                 return Ok(n);
+            }
+            // VEOF (Ctrl+D) on empty line: signal EOF to reader
+            if self.eof_pending {
+                self.eof_pending = false;
+                return Ok(0);
             }
             if !self.master_open {
                 // Master has closed: EOF

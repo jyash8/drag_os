@@ -28,6 +28,59 @@ fn all_tests() -> Vec<TestCase> {
         // suite cannot see. The command is a shell builtin that does nothing,
         // so the case waits for the boot output and finishes.
         TestCase {
+            name: "kms_fault",
+            command: "RUST_BACKTRACE=1 MYWIMA_DEBUG=1 /usr/bin/mywima --kms 2>&1; echo MYWIMA_RC=$?; echo DONE",
+            expected: &["KMS_SESSION", "MYWIMA_RC", "DONE"],
+            timeout_secs: 15,
+            gl_only: false,
+        },
+TestCase {
+            name: "stress_exec",
+            command: "i=0; while [ $i -lt 60 ]; do /usr/bin/vkprobe >/dev/null 2>&1 || echo FAIL$i; i=$((i+1)); done; echo STRESS_DONE",
+            expected: &["STRESS_DONE"],
+            timeout_secs: 90,
+            gl_only: false,
+        },
+TestCase {
+            name: "pjoin",
+            command: "/bin/pjoin; echo PJ_RC=$?",
+            expected: &["PJ_RC"],
+            timeout_secs: 10,
+            gl_only: false,
+        },
+        TestCase {
+            name: "ctxprobe",
+            command: "/usr/bin/ctxprobe; echo CTX_RC=$?",
+            expected: &["CTX_PROBE_PASS", "CTX_RC=0"],
+            timeout_secs: 30,
+            gl_only: false,
+        },
+        // PRIME dma-buf cross-process probe: export a dumb buffer to a dma-buf
+        // fd, mmap it, fork, re-import in the child and read back the pattern.
+        TestCase {
+            name: "primeprobe",
+            command: "/usr/bin/primeprobe; echo PRIME_RC=$?",
+            expected: &["PRIME_PROBE_PASS", "PRIME_RC=0"],
+            timeout_secs: 60,
+            gl_only: false,
+        },
+        // Atomic modeset + page flip + event drain probe.
+        TestCase {
+            name: "atomicprobe",
+            command: "/usr/bin/atomicprobe; echo ATOMIC_RC=$?",
+            expected: &["ATOMIC_PROBE_PASS", "ATOMIC_RC=0"],
+            timeout_secs: 60,
+            gl_only: false,
+        },
+        // Property GET + propblob round-trip probe.
+        TestCase {
+            name: "propblobprobe",
+            command: "/usr/bin/propblobprobe; echo PROPBLOB_RC=$?",
+            expected: &["PROPBLOB_PROBE_PASS", "PROPBLOB_RC=0"],
+            timeout_secs: 60,
+            gl_only: false,
+        },
+TestCase {
             name: "module_selftest",
             command: "true",
             expected: &["MODULE_SELFTEST_OK"],
@@ -259,16 +312,16 @@ fn all_tests() -> Vec<TestCase> {
         // curl dynamic library, DNS resolution & HTTP fetch probe
         TestCase {
             name: "curl_probe",
-            command: "/usr/bin/curl -s -v http://www.example.com",
+            command: "/usr/bin/curl -s -v --connect-timeout 5 --max-time 20 http://www.example.com",
             expected: &["Example Domain"],
-            timeout_secs: 35,
+            timeout_secs: 60,
             gl_only: false,
         },
         TestCase {
             name: "curl_probe_cern",
-            command: "/usr/bin/curl -s -v http://info.cern.ch",
+            command: "/usr/bin/curl -s -v --connect-timeout 5 --max-time 20 http://info.cern.ch",
             expected: &["home of the first website"],
-            timeout_secs: 35,
+            timeout_secs: 60,
             gl_only: false,
         },
         // OpenSSH client dynamic library & version probe

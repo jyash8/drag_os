@@ -78,7 +78,7 @@ for lib in ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libgcc_s.so.1 libgbm.so.1 li
            libinput.so.10 libpixman-1.so.0 libxkbcommon.so.0 libdrm.so.2 libevdev.so.2 libexpat.so.1 \
            libffi.so.8 libglib-2.0.so.0 libgobject-2.0.so.0 libgudev-1.0.so.0 liblua5.4.so.5.4 \
            libmtdev.so.1 libpcre2-8.so.0 libsystemd.so.0 libwacom.so.9 libcap.so.2 libz.so.1 libzstd.so.1 \
-           libgallium-*.so libLLVM.so.22.1 libSPIRV-Tools.so libsensors.so.5 \
+           libgallium-*.so libLLVM.so.23.1 libSPIRV-Tools.so libsensors.so.5 \
            libxcb.so.1 libxcb-randr.so.0 libxcb-sync.so.1 libxcb-present.so.0 libxshmfence.so.1 \
            libxcb-xfixes.so.0 libxcb-dri3.so.0 libelf.so.1 libdrm_amdgpu.so.1 libdrm_intel.so.1 \
            libX11-xcb.so.1 libstdc++.so.6 libedit.so.0 libxml2.so.16 libXau.so.6 libXdmcp.so.6 \
@@ -667,6 +667,7 @@ cat << 'EOF' > "$STAGING"/etc/draginit/05-dbus.toml
 [daemon]
 name = "dbus-daemon"
 path = "/usr/bin/dbus-daemon"
+args = ["--config-file=/usr/share/dbus-1/session.conf", "--nosyslog", "--nopidfile"]
 uid = 1000
 gid = 1000
 delay_ms = 0
@@ -674,7 +675,7 @@ restart = "never"
 restart_delay_ms = 2000
 [daemon.env]
 DBUS_SESSION_BUS_ADDRESS = "unix:path=/run/user/1000/bus"
-EOF
+XDG_RUNTIME_DIR = "/run/user/1000"
 
 cat << 'EOF' > "$STAGING"/etc/draginit/15-xdg-portal.toml
 [daemon]
@@ -837,14 +838,6 @@ restart = "never"
 WAYLAND_DISPLAY = "/run/user/1000/wayland-1"
 LD_LIBRARY_PATH = "/lib:/usr/lib"
 VK_ICD_FILENAMES = "/usr/share/vulkan/icd.d/virtio_icd.json"
-EOF
-cat << 'EOF' > "$STAGING"/etc/draginit/50-shell.toml
-[daemon]
-name = "shell"
-path = "/usr/bin/ptyrun"
-args = ["/bin/sh"]
-delay_ms = 2000
-restart = "never"
 EOF
 
 # Startup init script
@@ -1124,6 +1117,91 @@ if [ -f "$ROOT/initrd/fixed_size_test.c" ] && command -v wayland-scanner >/dev/n
     && cp -p "/tmp/opencode/fixed_size_test" "$ROOT/initrd/fixed_size_test" \
     && echo "[build-fs] fixed_size_test built from source"
 fi
+
+# PRIME dma-buf cross-process probe: export a dumb buffer to a dma-buf fd,
+# mmap it, fork, re-import in the child and read back the pattern.
+# Verifies PRIME_HANDLE_TO_FD, PRIME_FD_TO_HANDLE and dma-buf fd mmap.
+if [ -f "$ROOT/initrd/primeprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/primeprobe" "$ROOT/initrd/primeprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/primeprobe" \
+    && cp -p "/tmp/opencode/primeprobe" "$STAGING/bin/primeprobe" \
+    && stage_bin_with_libs "/tmp/opencode/primeprobe" \
+    && cp -p "/tmp/opencode/primeprobe" "$STAGING/usr/bin/primeprobe" \
+    && cp -p "/tmp/opencode/primeprobe" "$ROOT/initrd/primeprobe" \
+    && echo "[build-fs] primeprobe built from source"
+fi
+
+
+# Gamma GET/SET guest probe.
+if [ -f "$ROOT/initrd/gammaprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/gammaprobe" "$ROOT/initrd/gammaprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/gammaprobe" \
+    && cp -p "/tmp/opencode/gammaprobe" "$STAGING/bin/gammaprobe" \
+    && stage_bin_with_libs "/tmp/opencode/gammaprobe" \
+    && cp -p "/tmp/opencode/gammaprobe" "$STAGING/usr/bin/gammaprobe" \
+    && cp -p "/tmp/opencode/gammaprobe" "$ROOT/initrd/gammaprobe" \
+    && echo "[build-fs] gammaprobe built from source"
+fi
+
+# DIRTYFB damage clipping probe.
+if [ -f "$ROOT/initrd/damageprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/damageprobe" "$ROOT/initrd/damageprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/damageprobe" \
+    && cp -p "/tmp/opencode/damageprobe" "$STAGING/bin/damageprobe" \
+    && stage_bin_with_libs "/tmp/opencode/damageprobe" \
+    && cp -p "/tmp/opencode/damageprobe" "$STAGING/usr/bin/damageprobe" \
+    && cp -p "/tmp/opencode/damageprobe" "$ROOT/initrd/damageprobe" \
+    && echo "[build-fs] damageprobe built from source"
+fi
+
+# VT activate + KDSETMODE probe.
+if [ -f "$ROOT/initrd/vtprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/vtprobe" "$ROOT/initrd/vtprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/vtprobe" \
+    && cp -p "/tmp/opencode/vtprobe" "$STAGING/bin/vtprobe" \
+    && stage_bin_with_libs "/tmp/opencode/vtprobe" \
+    && cp -p "/tmp/opencode/vtprobe" "$STAGING/usr/bin/vtprobe" \
+    && cp -p "/tmp/opencode/vtprobe" "$ROOT/initrd/vtprobe" \
+    && echo "[build-fs] vtprobe built from source"
+fi
+
+# ctxprobe context_init capset verify probe.
+if [ -f "$ROOT/initrd/ctxprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/ctxprobe" "$ROOT/initrd/ctxprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/ctxprobe" \
+    && cp -p "/tmp/opencode/ctxprobe" "$STAGING/bin/ctxprobe" \
+    && stage_bin_with_libs "/tmp/opencode/ctxprobe" \
+    && cp -p "/tmp/opencode/ctxprobe" "$STAGING/usr/bin/ctxprobe" \
+    && cp -p "/tmp/opencode/ctxprobe" "$ROOT/initrd/ctxprobe" \
+    && echo "[build-fs] ctxprobe built from source"
+fi
+
+# Atomic modeset + page flip + event guest probe.
+# Verifies TEST_ONLY no-op, real commit applies fb, and flip-complete event
+# drains with matching user_data.
+if [ -f "$ROOT/initrd/atomicprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/atomicprobe" "$ROOT/initrd/atomicprobe.c" -lrt 2>/dev/null \
+    && chmod +x "/tmp/opencode/atomicprobe" \
+    && cp -p "/tmp/opencode/atomicprobe" "$STAGING/bin/atomicprobe" \
+    && stage_bin_with_libs "/tmp/opencode/atomicprobe" \
+    && cp -p "/tmp/opencode/atomicprobe" "$STAGING/usr/bin/atomicprobe" \
+    && cp -p "/tmp/opencode/atomicprobe" "$ROOT/initrd/atomicprobe" \
+    && echo "[build-fs] atomicprobe built from source"
+fi
+
+# Property GET + propblob round-trip guest probe.
+# Verifies MODE_GETPROPERTY returns expected properties and
+# CREATEPROPBLOB/GETPROPBLOB/DESTROYPROPBLOB round-trip correctly.
+if [ -f "$ROOT/initrd/propblobprobe.c" ]; then
+  gcc -O2 -o "/tmp/opencode/propblobprobe" "$ROOT/initrd/propblobprobe.c" 2>/dev/null \
+    && chmod +x "/tmp/opencode/propblobprobe" \
+    && cp -p "/tmp/opencode/propblobprobe" "$STAGING/bin/propblobprobe" \
+    && stage_bin_with_libs "/tmp/opencode/propblobprobe" \
+    && cp -p "/tmp/opencode/propblobprobe" "$STAGING/usr/bin/propblobprobe" \
+    && cp -p "/tmp/opencode/propblobprobe" "$ROOT/initrd/propblobprobe" \
+    && echo "[build-fs] propblobprobe built from source"
+fi
+
 if [ -f /tmp/opencode/vidtest.rgb32 ]; then
   cp -p /tmp/opencode/vidtest.rgb32 "$STAGING/vidtest.rgb32"
 fi
@@ -1263,7 +1341,10 @@ fi
 [ -f /home/jyash8/Projects/drag_os/initrd/poweroff ] && cp -p /home/jyash8/Projects/drag_os/initrd/poweroff "$STAGING"/bin/poweroff
 BUSYBOX="$ROOT/vendor/busybox-1.36.1/busybox"
 if [ -f "$BUSYBOX" ]; then
-  for applet in busybox mount mkdir umount; do
+  # Copy busybox once per applet name so multi-call invocation works
+  # (busybox dispatches on argv[0]). Network applets are needed to bring
+  # up eth0 under QEMU user-mode networking (DHCP) so curl/wget/ssh work.
+  for applet in busybox mount mkdir umount ip udhcpc ifconfig route; do
     cp -p "$BUSYBOX" "$STAGING"/bin/$applet
     chmod +x "$STAGING"/bin/$applet
   done

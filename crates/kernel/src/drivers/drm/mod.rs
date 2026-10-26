@@ -901,8 +901,8 @@ pub fn drm_ioctl(cmd: u64, argp: u64) -> u64 {
         DRM_IOCTL_MODE_SETCRTC => handle_set_crtc(argp),
         DRM_IOCTL_MODE_GETENCODER => handle_get_encoder(argp),
         DRM_IOCTL_MODE_GETCONNECTOR => handle_get_connector(argp),
-        DRM_IOCTL_MODE_GETGAMMA => 0,
-        DRM_IOCTL_MODE_SETGAMMA => 0,
+        DRM_IOCTL_MODE_GETGAMMA => crate::arch::x86_64::syscalls::ENOTTY,
+        DRM_IOCTL_MODE_SETGAMMA => crate::arch::x86_64::syscalls::ENOTTY,
         DRM_IOCTL_MODE_OBJ_GETPROPERTIES => handle_obj_get_properties(argp),
         DRM_IOCTL_MODE_GETPROPERTY => handle_get_property(argp),
         DRM_IOCTL_MODE_GETPROPBLOB => handle_get_prop_blob(argp),
@@ -1850,6 +1850,18 @@ fn handle_atomic_commit(argp: u64) -> u64 {
                 if let Some(y) = pu.src_y { pl.src_y = y << 16; }
                 if let Some(w) = pu.src_w { pl.src_w = w << 16; }
                 if let Some(h) = pu.src_h { pl.src_h = h << 16; }
+
+                // Mirror the primary plane's fb onto its CRTC so that
+                // MODE_GETCRTC after an atomic commit reports the active
+                // scanout buffer (Linux keeps crtc->fb_id in sync with the
+                // primary plane's fb during atomic commits). Non-primary
+                // planes have no CRTC-scanned fb, so skip them here.
+                if pu.fb_id.is_some() && pl.plane_type == DRM_PLANE_TYPE_PRIMARY {
+                    let target_crtc_id = pu.crtc_id.unwrap_or(pl.crtc_id);
+                    if let Some(crtc) = d.crtcs.iter_mut().find(|c| c.id == target_crtc_id) {
+                        crtc.fb_id = pu.fb_id.unwrap();
+                    }
+                }
             }
 
             let (new_s, crtc_id, fb_id, pl_id, pl_type) = {
@@ -3350,12 +3362,6 @@ fn handle_page_flip(argp: u64) -> u64 {
     }
 }
 
-// ── DRM_IOCTL_MODE_DIRTYFB ───────────────────────────────────────────────────
-
-/// Damage clips from userspace: appended to the fb's pending set, consumed
-/// by the next flip (which transfers only the clipped rects). num_clips==0
-/// with no flags is a no-op; FULL flag, insane counts, or overflow mark the
-/// fb for a full-frame transfer. Never nests locks (GLOBAL_DRM dropped first).
 fn handle_dirtyfb(argp: u64) -> u64 {
     if !vr_read(argp, core::mem::size_of::<DrmModeFbDirtyCmd>()) {
         return EFAULT;
@@ -4023,6 +4029,13 @@ fn handle_prime_handle_to_fd(argp: u64) -> u64 {
     crate::tasks::set_current_thread(Some(t));
 
     req.fd = fd_num;
+    // Register the prime fd with the global handle registry so that
+    // mmap() (which maps via GLOBAL_DRM.prime_handles) can resolve it
+    // to the underlying dumb-buffer physical memory.  Without this, the
+    // VFS fd is readable (as a VNode::DmaBuf) but unmappable.
+    GLOBAL_DRM.lock().as_mut().map(|d| {
+        d.prime_handles.insert(fd_num as u32, req.handle);
+    });
     crate::dprintln!("[PRIME] handle_to_fd: handle={} -> vfs fd={} (size={} blob={})",
                      req.handle, fd_num, db_size, db_is_blob);
     0
@@ -4088,6 +4101,13 @@ fn handle_prime_fd_to_handle(argp: u64) -> u64 {
             }
         }
     }
+
+    // Register the imported fd so that mmap() in this process can resolve
+    // the fd number to the BO physical memory via GLOBAL_DRM.prime_handles
+    // (mirrors handle_prime_handle_to_fd's export registration).
+    GLOBAL_DRM.lock().as_mut().map(|d| {
+        d.prime_handles.insert(fd as u32, handle);
+    });
 
     req.handle = handle;
     crate::dprintln!("[PRIME] fd_to_handle: vfs fd={} -> handle={} res_id={:?}", fd, handle, res_id);

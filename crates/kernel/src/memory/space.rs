@@ -174,6 +174,24 @@ pub fn fork_address_space(
                         continue;
                     }
                     if pte.flags().contains(PageTableFlags::FILE_CACHE) {
+                        // A forked process must not retain write access to a cached
+                        // library page.  Turn writable copied file mappings into COW
+                        // entries so the first write consumes one clean private
+                        // page instead of modifying the shared DSO frame.  This is
+                        // the same conversion performed for anonymous private
+                        // pages below; FILE_CACHE frames intentionally carry no
+                        // COW-table reference, so cow_add is not applied here.
+                        if pte.flags().contains(PageTableFlags::WRITABLE) {
+                            let shared = *child_pt.entry_mut(pti);
+                            let frame = shared.address().as_u64() >> 12;
+                            child_pt.entry_mut(pti).clear_flags(PageTableFlags::WRITABLE);
+                            child_pt.entry_mut(pti).set_flags(PageTableFlags::COW);
+                            pt.entry_mut(pti).clear_flags(PageTableFlags::WRITABLE);
+                            pt.entry_mut(pti).set_flags(PageTableFlags::COW);
+                            if frame != 0 {
+                                let _ = frame;
+                            }
+                        }
                         *child_pt.entry_mut(pti) = pte;
                         crate::memory::dsocache::retain_from_frame(pte.address().as_u64() >> 12);
                         continue;
@@ -203,6 +221,7 @@ pub fn fork_address_space(
     }
     // drop stale writable TLB entries for the parent's COW-marked pages
     unsafe { write_cr3(parent_pml4) };
+    crate::smp::flush_tlb_all_cores();
     Ok(child_pml4)
 }
 
@@ -476,6 +495,7 @@ pub fn cow_write_fault(cr2: u64, phys_offset: u64) -> bool {
     }
 
     invlpg(cr2);
+    crate::smp::flush_tlb_page(cr2);
     true
 }
 
@@ -526,6 +546,7 @@ pub fn mark_cow(cr2: u64, phys_offset: u64) {
         entry.clear_flags(PageTableFlags::WRITABLE);
         entry.set_flags(PageTableFlags::COW);
         invlpg(cr2);
+        crate::smp::flush_tlb_page(cr2);
     }
 }
 

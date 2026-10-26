@@ -1225,6 +1225,23 @@ pub(super) fn sys_ioctl(fd: usize, cmd: u64, argp: u64) -> u64 {
                 drop(open_file);
                 return crate::drivers::drm::drm_ioctl(cmd, argp);
             }
+            crate::fs::vfs::VNode::DmaBuf(_) => {
+                drop(open_file);
+                if cmd == drm_uapi::DMA_BUF_IOCTL_SYNC {
+                    if !validate_user_read_range(argp, 8) {
+                        return EFAULT;
+                    }
+                    let flags = unsafe { core::ptr::read_unaligned(argp as *const u64) };
+                    const SYNC_MASK: u64 = (drm_uapi::DMA_BUF_SYNC_RW
+                        | drm_uapi::DMA_BUF_SYNC_START
+                        | drm_uapi::DMA_BUF_SYNC_END) as u64;
+                    if flags & !SYNC_MASK != 0 {
+                        return EINVAL;
+                    }
+                    return 0; // memory is shared/coherent; sync is a no-op
+                }
+                return super::ENOTTY;
+            }
             crate::fs::vfs::VNode::InputEventDevice { minor }
             | crate::fs::vfs::VNode::InputMiceDevice { minor } => {
                 // ponytail: per-device caps from the live table; node freed

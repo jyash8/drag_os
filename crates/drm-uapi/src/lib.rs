@@ -360,6 +360,44 @@ pub const DRM_CONNECTOR_TYPE_HDMIA: u32 = 11;
 pub const DRM_CONNECTOR_TYPE_eDP: u32 = 14;
 pub const DRM_CONNECTOR_TYPE_VIRTUAL: u32 = 15;
 
+/// dma-buf.h: `struct dma_buf_sync { __u64 flags; }` — 8 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DmaBufSync {
+    pub flags: u64,
+}
+
+/// dma-buf.h: `DMA_BUF_SYNC_*` flag bits for `DMA_BUF_IOCTL_SYNC`.
+pub const DMA_BUF_SYNC_READ: u32 = 1 << 0;
+pub const DMA_BUF_SYNC_WRITE: u32 = 1 << 1;
+pub const DMA_BUF_SYNC_RW: u32 = DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE;
+pub const DMA_BUF_SYNC_START: u32 = 1 << 2;
+pub const DMA_BUF_SYNC_END: u32 = 1 << 3;
+
+/// dma-buf.h: `#define DMA_BUF_IOCTL_SYNC _IOWR('b', 0, struct dma_buf_sync)`
+/// = `0xC0086200`. This is **not** a DRM ioctl — it uses type `'b'`, so it is
+/// computed with `ioc` directly rather than `drm_ioctl_t` (which hardcodes
+/// `'d'`).
+pub const DMA_BUF_IOCTL_SYNC: u64 = ioc(
+    IOC_RW,
+    b'b' as u32,
+    0x00,
+    core::mem::size_of::<DmaBufSync>() as u32,
+);
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DrmModeCrtcLut {
+    pub crtc_id: u32,
+    pub gamma_size: u32,
+    pub red: u64,
+    pub green: u64,
+    pub blue: u64,
+}
+
+// Size pin: 32 bytes (matches DRM_IOCTL_MODE_GETGAMMA/SETGAMMA payload).
+const _: () = assert!(core::mem::size_of::<DrmModeCrtcLut>() == 32);
+
 pub const DRM_CAP_DUMB_BUFFER: u64 = 1;
 pub const DRM_CAP_VBLANK_HIGH_CRTC: u64 = 2;
 pub const DRM_CAP_DUMB_PREFERRED_DEPTH: u64 = 3;
@@ -1165,5 +1203,19 @@ mod abi_regression_tests {
         assert_eq!(core::mem::size_of::<DrmModeAtomic>(), 56);
         assert_eq!(core::mem::align_of::<DrmModeAtomic>(), 8);
         assert_eq!(DRM_IOCTL_MODE_ATOMIC, 0xC03864BC);
+    }
+
+    /// dma-buf.h: struct dma_buf_sync is exactly 8 bytes (u64 flags).
+    #[test]
+    fn dma_buf_sync_is_8_bytes() {
+        assert_eq!(core::mem::size_of::<DmaBufSync>(), 8);
+        assert_eq!(core::mem::align_of::<DmaBufSync>(), 8);
+    }
+
+    /// dma-buf.h: DMA_BUF_IOCTL_SYNC = _IOWR('b', 0, struct dma_buf_sync).
+    #[test]
+    fn dma_buf_sync_ioctl_number_is_upstream() {
+        assert_eq!(DMA_BUF_IOCTL_SYNC, 0xC0086200);
+        assert_eq!(DMA_BUF_SYNC_RW, DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE);
     }
 }

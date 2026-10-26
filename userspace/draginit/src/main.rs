@@ -180,7 +180,7 @@ fn bootstrap_env() {
     unsafe {
         std::env::set_var("PATH", "/bin:/usr/bin:/usr/local/bin:/usr/sbin:/sbin");
         std::env::set_var("HOME", "/root");
-        std::env::set_var("XDG_RUNTIME_DIR", "/run");
+        std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
         std::env::set_var("XDG_CONFIG_HOME", "/root/.config");
         std::env::set_var("XCURSOR_THEME", "Adwaita");
         std::env::set_var("XCURSOR_SIZE", "24");
