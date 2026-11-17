@@ -666,7 +666,7 @@ pub fn fault_process() -> Option<Arc<SpinLock<Process>>> {
                 };
                 out
             }
-            None => {
+            _ => {
                 // Demand fault under CPUS-hold with no stash: dump forensics
                 // (stack words resolve the caller via nm) and fail gracefully
                 // instead of re-entry-panicking and masking the fault.
@@ -802,7 +802,7 @@ pub fn dump_thread_states(reason: &str) {
         let run: Vec<Thread> = {
             let s = match SCHEDULER.try_lock() {
                 Some(s) => s,
-                None => {
+                _ => {
                     crate::dprintln!("[threads] dump: skipped (SCHEDULER held elsewhere)");
                     return;
                 }
@@ -929,7 +929,7 @@ pub fn wake_futex_waiters(uaddr: u64, max_wake: usize, caller_pid: u64) -> usize
 
     let mut wq = FUTEX_WAIT_QUEUE.lock();
     let mut kept = VecDeque::with_capacity(wq.len());
-    while let Some(t) = wq.pop_front() {
+    while let Some(mut t) = wq.pop_front() {
         if woken < max_wake
             && matches!(t.pending_block, Some(PendingBlock::Futex { uaddr: a, pid, .. }) if a == uaddr && (pid == caller_pid || caller_pid == 0))
         {
@@ -970,7 +970,7 @@ pub fn wake_syncoff_waiters(handle: u32, pid: u64) -> usize {
 
     let mut wq = SYNCOBJ_WAIT_QUEUE.lock();
     let mut kept = VecDeque::with_capacity(wq.len());
-    while let Some(t) = wq.pop_front() {
+    while let Some(mut t) = wq.pop_front() {
         if let Some(PendingBlock::Syncobj { handle: h, pid: p, .. }) = t.pending_block {
             if h == handle && (p == pid || pid == 0) {
                 let mut t = t;
@@ -1060,19 +1060,19 @@ pub fn wake_sleep_waiters_for_pid(pid: u64) {
     let mut sched = SCHEDULER.lock();
     let mut wq = FUTEX_WAIT_QUEUE.lock();
     let mut kept = VecDeque::with_capacity(wq.len());
-    while let Some(t) = wq.pop_front() {
+    while let Some(mut t) = wq.pop_front() {
         let is_sleep = matches!(t.pending_block, Some(PendingBlock::Sleep { .. }));
         if is_sleep {
             let t_pid = t.process.try_lock().map(|p| p.pid).unwrap_or(0);
             match t_pid {
-                Some(pid) if pid == pid_param => {
+                t_pid if t_pid == pid => {
                     t.pending_block = None;
                     sched.enqueue_with_boost(t, 4);
                 }
-                Some(_) => {
+                 _ => {
                     kept.push_back(t);
                 }
-                None => {
+                _ => {
                     // process.lock() contended — keep in queue for later
                     kept.push_back(t);
                 }
@@ -1114,7 +1114,7 @@ pub fn wake_expired_waiters(now: u64) -> usize {
         let mut sched = SCHEDULER.lock();
         let mut wq = FUTEX_WAIT_QUEUE.lock();
         let mut kept = VecDeque::with_capacity(wq.len());
-        while let Some(t) = wq.pop_front() {
+        while let Some(mut t) = wq.pop_front() {
             if futex_expired(&t, now) {
                 let mut t = t;
                 t.pending_block = None;
@@ -1132,7 +1132,7 @@ pub fn wake_expired_waiters(now: u64) -> usize {
         let mut sched = SCHEDULER.lock();
         let mut wq = SYNCOBJ_WAIT_QUEUE.lock();
         let mut kept = VecDeque::with_capacity(wq.len());
-        while let Some(t) = wq.pop_front() {
+        while let Some(mut t) = wq.pop_front() {
             if syncobj_expired(&t, now) {
                 let mut t = t;
                 t.pending_block = None;
@@ -1150,7 +1150,7 @@ pub fn wake_expired_waiters(now: u64) -> usize {
         let mut sched = SCHEDULER.lock();
         let mut wq = PIPE_WAIT_QUEUE.lock();
         let mut kept = VecDeque::with_capacity(wq.len());
-        while let Some(t) = wq.pop_front() {
+        while let Some(mut t) = wq.pop_front() {
             if epoll_expired(&t, now) {
                 let mut t = t;
                 t.pending_block = None;
@@ -1234,17 +1234,17 @@ pub fn wake_blocked_for_pid(pid: u64) {
     let mut sweep = |wq: &'static SpinLock<VecDeque<Thread>>| {
         let mut q = wq.lock();
         let mut kept = VecDeque::with_capacity(q.len());
-        while let Some(t) = q.pop_front() {
+        while let Some(mut t) = q.pop_front() {
             let t_pid = t.process.try_lock().map(|p| p.pid).unwrap_or(0);
             match t_pid {
-                Some(pid) if pid == pid_param => {
+                t_pid if t_pid == pid => {
                     t.pending_block = None;
                     sched.enqueue_with_boost(t, 4);
                 }
-                Some(_) => {
+                 _ => {
                     kept.push_back(t);
                 }
-                None => {
+                _ => {
                     // process.lock() contended — keep in queue for later
                     kept.push_back(t);
                 }
@@ -1628,14 +1628,14 @@ fn exit_thread_internal(exit_code: i32, is_group_exit: bool) -> ! {
                 while let Some(mut t) = child_wait.pop_front() {
                     let t_pid = t.process.try_lock().map(|p| p.pid).unwrap_or(0);
                     match t_pid {
-                        Some(pid) if pid == ppid => {
+                        t_pid if t_pid == ppid => {
                             t.pending_block = None;
                             queue.enqueue_with_boost(t, 4);
                         }
-                        Some(_) => {
+                         _ => {
                             kept.push_back(t);
                         }
-                        None => {
+                        _ => {
                             // process.lock() contended — keep in queue for later
                             kept.push_back(t);
                         }
@@ -1660,7 +1660,7 @@ fn exit_thread_internal(exit_code: i32, is_group_exit: bool) -> ! {
                                 t.pending_block == Some(crate::tasks::PendingBlock::ChildWait)
                                     && t.process.try_lock().map(|p| p.pid == ppid).unwrap_or(false)
                             }).unwrap_or(false)
-                        };
+                        }).unwrap_or(false);
                         if should_wake {
                             let cpu = cpu_guard.as_mut().unwrap();
                             let mut t = cpu.current.take().unwrap();
@@ -1753,7 +1753,7 @@ fn exit_thread_internal(exit_code: i32, is_group_exit: bool) -> ! {
                 }
             }
         }
-        None => {
+        _ => {
             // No runnable thread right now.  Rather than halting this CPU
             // permanently (which would mean CPU 0 can never run another
             // process after the last one exits), enter the same idle loop
@@ -2114,17 +2114,17 @@ pub fn wake_parked_for_pid(pid: u64) {
     let mut sweep = |wq: &'static SpinLock<VecDeque<Thread>>| {
         let mut q = wq.lock();
         let mut kept = VecDeque::with_capacity(q.len());
-        while let Some(t) = q.pop_front() {
+        while let Some(mut t) = q.pop_front() {
             let t_pid = t.process.try_lock().map(|p| p.pid).unwrap_or(0);
             match t_pid {
-                Some(pid) if pid == pid_param => {
+                t_pid if t_pid == pid => {
                     t.pending_block = None;
                     sched.enqueue_with_boost(t, 4);
                 }
-                Some(_) => {
+                 _ => {
                     kept.push_back(t);
                 }
-                None => {
+                _ => {
                     // process.lock() contended — keep in queue for later
                     kept.push_back(t);
                 }
