@@ -1062,10 +1062,21 @@ pub fn wake_sleep_waiters_for_pid(pid: u64) {
     let mut kept = VecDeque::with_capacity(wq.len());
     while let Some(t) = wq.pop_front() {
         let is_sleep = matches!(t.pending_block, Some(PendingBlock::Sleep { .. }));
-        if is_sleep && t.process.lock().pid == pid {
-            let mut t = t;
-            t.pending_block = None;
-            sched.enqueue_with_boost(t, 4);
+        if is_sleep {
+            let t_pid = t.process.try_lock().map(|p| p.pid).unwrap_or(0);
+            match t_pid {
+                Some(pid) if pid == pid_param => {
+                    t.pending_block = None;
+                    sched.enqueue_with_boost(t, 4);
+                }
+                Some(_) => {
+                    kept.push_back(t);
+                }
+                None => {
+                    // process.lock() contended — keep in queue for later
+                    kept.push_back(t);
+                }
+            }
         } else {
             kept.push_back(t);
         }
@@ -1224,12 +1235,19 @@ pub fn wake_blocked_for_pid(pid: u64) {
         let mut q = wq.lock();
         let mut kept = VecDeque::with_capacity(q.len());
         while let Some(t) = q.pop_front() {
-            if t.process.lock().pid == pid {
-                let mut t = t;
-                t.pending_block = None;
-                sched.enqueue_with_boost(t, 4);
-            } else {
-                kept.push_back(t);
+            let t_pid = t.process.try_lock().map(|p| p.pid).unwrap_or(0);
+            match t_pid {
+                Some(pid) if pid == pid_param => {
+                    t.pending_block = None;
+                    sched.enqueue_with_boost(t, 4);
+                }
+                Some(_) => {
+                    kept.push_back(t);
+                }
+                None => {
+                    // process.lock() contended — keep in queue for later
+                    kept.push_back(t);
+                }
             }
         }
         *q = kept;
@@ -1588,28 +1606,39 @@ fn exit_thread_internal(exit_code: i32, is_group_exit: bool) -> ! {
     {
         if is_last_thread {
             // Purge sibling threads of the dead process from SCHEDULER runqueue
-            queue.retain(|t| t.process.lock().pid != child_pid);
+            // try_lock: holding SCHEDULER and blocking on process.lock() violates
+            // AGENTS.md §1 (process.lock() is innermost). On contention, keep
+            // the entry — it will be cleaned up on a later pass.
+            queue.retain(|t| t.process.try_lock().map(|p| p.pid != child_pid).unwrap_or(true));
 
             // Purge sibling threads from wait-queues
-            KEYBOARD_WAIT_QUEUE.lock().retain(|t| t.process.lock().pid != child_pid);
-            PIPE_WAIT_QUEUE.lock().retain(|t| t.process.lock().pid != child_pid);
-            FUTEX_WAIT_QUEUE.lock().retain(|t| t.process.lock().pid != child_pid);
-            INPUT_WAIT_QUEUE.lock().retain(|t| t.process.lock().pid != child_pid);
+            KEYBOARD_WAIT_QUEUE.lock().retain(|t| t.process.try_lock().map(|p| p.pid != child_pid).unwrap_or(true));
+            PIPE_WAIT_QUEUE.lock().retain(|t| t.process.try_lock().map(|p| p.pid != child_pid).unwrap_or(true));
+            FUTEX_WAIT_QUEUE.lock().retain(|t| t.process.try_lock().map(|p| p.pid != child_pid).unwrap_or(true));
+            INPUT_WAIT_QUEUE.lock().retain(|t| t.process.try_lock().map(|p| p.pid != child_pid).unwrap_or(true));
             // DRM syncobj waiters too. Leaving them queued would let a later
             // SYNCOBJ_SIGNAL re-enqueue a thread whose process is already
             // gone, dispatching it against a zombie process.
-            SYNCOBJ_WAIT_QUEUE.lock().retain(|t| t.process.lock().pid != child_pid);
+            SYNCOBJ_WAIT_QUEUE.lock().retain(|t| t.process.try_lock().map(|p| p.pid != child_pid).unwrap_or(true));
 
             if ppid != 0 {
                 // Wake any thread from the parent that is blocked in waitpid/wait4.
                 let mut child_wait = CHILD_WAIT_QUEUE.lock();
                 let mut kept = VecDeque::new();
                 while let Some(mut t) = child_wait.pop_front() {
-                    if t.process.lock().pid == ppid {
-                        t.pending_block = None;
-                        queue.enqueue_with_boost(t, 4);
-                    } else if t.process.lock().pid != child_pid {
-                        kept.push_back(t);
+                    let t_pid = t.process.try_lock().map(|p| p.pid).unwrap_or(0);
+                    match t_pid {
+                        Some(pid) if pid == ppid => {
+                            t.pending_block = None;
+                            queue.enqueue_with_boost(t, 4);
+                        }
+                        Some(_) => {
+                            kept.push_back(t);
+                        }
+                        None => {
+                            // process.lock() contended — keep in queue for later
+                            kept.push_back(t);
+                        }
                     }
                 }
                 *child_wait = kept;
@@ -1629,9 +1658,9 @@ fn exit_thread_internal(exit_code: i32, is_group_exit: bool) -> ! {
                         let should_wake = cpu_guard.as_ref().map(|cpu| {
                             cpu.current.as_ref().map(|t| {
                                 t.pending_block == Some(crate::tasks::PendingBlock::ChildWait)
-                                    && t.process.lock().pid == ppid
+                                    && t.process.try_lock().map(|p| p.pid == ppid).unwrap_or(false)
                             }).unwrap_or(false)
-                        }).unwrap_or(false);
+                        };
                         if should_wake {
                             let cpu = cpu_guard.as_mut().unwrap();
                             let mut t = cpu.current.take().unwrap();
@@ -2086,12 +2115,19 @@ pub fn wake_parked_for_pid(pid: u64) {
         let mut q = wq.lock();
         let mut kept = VecDeque::with_capacity(q.len());
         while let Some(t) = q.pop_front() {
-            if t.process.lock().pid == pid {
-                let mut t = t;
-                t.pending_block = None;
-                sched.enqueue_with_boost(t, 4);
-            } else {
-                kept.push_back(t);
+            let t_pid = t.process.try_lock().map(|p| p.pid).unwrap_or(0);
+            match t_pid {
+                Some(pid) if pid == pid_param => {
+                    t.pending_block = None;
+                    sched.enqueue_with_boost(t, 4);
+                }
+                Some(_) => {
+                    kept.push_back(t);
+                }
+                None => {
+                    // process.lock() contended — keep in queue for later
+                    kept.push_back(t);
+                }
             }
         }
         *q = kept;

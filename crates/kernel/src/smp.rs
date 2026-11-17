@@ -475,10 +475,10 @@ pub fn timer_tick_on_core(mut current_stack_ptr: u64) -> u64 {
                 crate::tasks::PendingBlock::ChildWait => {
                     // Lost-wakeup fix: child may have exited before this park.
                     // If a zombie already exists, don't park — let wait4 reap it.
-                    let has_zombie = {
-                        let p = current.process.lock();
-                        p.children.iter().any(|c| c.lock().status == crate::tasks::ProcessStatus::Zombie)
-                    };
+                    // try_lock: holding SCHEDULER and blocking on process.lock() violates
+                    // AGENTS.md §1 (process.lock() is innermost). On contention,
+                    // assume not a zombie — it will be caught on the next tick.
+                    let has_zombie = current.process.try_lock().map(|p| p.children.iter().any(|c| c.lock().status == crate::tasks::ProcessStatus::Zombie)).unwrap_or(false);
                     if has_zombie {
                         let mut cur = current;
                         cur.pending_block = None;

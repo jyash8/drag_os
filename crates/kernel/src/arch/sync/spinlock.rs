@@ -9,8 +9,11 @@ use crate::interrupts::{disable_interrupts, enable_interrupts, interrupts_enable
 
 pub struct SpinLock<T> {
     is_locked: AtomicBool,
+    release_seq: AtomicU32,
     holder_cpu: AtomicU8,
     holder_rip: AtomicU64,
+    holder_file: AtomicU64,
+    holder_file_len: AtomicU32,
     holder_line: AtomicU32,
     name: [u8; 32],
     data: UnsafeCell<T>,
@@ -23,8 +26,11 @@ impl<T> SpinLock<T> {
     pub const fn new(data: T) -> Self {
         Self {
             is_locked: AtomicBool::new(false),
+            release_seq: AtomicU32::new(0),
             holder_cpu: AtomicU8::new(u8::MAX),
             holder_rip: AtomicU64::new(0),
+            holder_file: AtomicU64::new(0),
+            holder_file_len: AtomicU32::new(0),
             holder_line: AtomicU32::new(0),
             name: Self::make_name("unnamed"),
             data: UnsafeCell::new(data),
@@ -45,8 +51,11 @@ impl<T> SpinLock<T> {
     pub const fn named(name: &'static str, data: T) -> Self {
         Self {
             is_locked: AtomicBool::new(false),
+            release_seq: AtomicU32::new(0),
             holder_cpu: AtomicU8::new(u8::MAX),
             holder_rip: AtomicU64::new(0),
+            holder_file: AtomicU64::new(0),
+            holder_file_len: AtomicU32::new(0),
             holder_line: AtomicU32::new(0),
             name: Self::make_name(name),
             data: UnsafeCell::new(data),

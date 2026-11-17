@@ -165,3 +165,19 @@
 
 # ── OS-specific ─────────────────────────────────────────────────────────────
 .DS_Store
+
+# ── Diagnostic logs (regenerated per run, not source) ──
+diag*.log
+ff_run*.log
+pcv*.log
+pcsuite.log
+symfix.log
+verify_*.log
+build.log
+
+# ── Initrd compiled binaries and shared objects ──
+initrd/strace
+initrd/video_probe
+initrd/*.so
+initrd/lib*.so
+initrd/ld-linux-*
